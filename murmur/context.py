@@ -1,9 +1,27 @@
 """Per-recording context for prompt building."""
 import logging, threading, time
-from . import brain, win
+from collections import namedtuple
+from . import brain, store, win
 from .card import pick_rect
 
 log = logging.getLogger("murmur")
+
+
+def wide(cfg, chars=2000):
+    """cfg with the context read window widened to `chars` each side (edit detection needs more than the prompt does)."""
+    c = cfg.get("context", {})
+    return {**cfg, "context": {**c, "before_chars": max(c.get("before_chars", 600), chars), "after_chars": max(c.get("after_chars", 200), chars)}}
+
+
+def read_text(cfg, timeout=1.5):
+    """(foreground process, whole-field text around the caret) read-only, on a worker thread with a join cap; ('', '') on failure."""
+    got = {}
+    t = threading.Thread(target=lambda: got.update(app=win.active_app()[0], f=read_field(wide(cfg), text=True)), daemon=True)
+    t.start(); t.join(timeout)
+    f = got.get("f") or {}
+    if f.get("password"):
+        return "", ""
+    return got.get("app", ""), f.get("before", "") + f.get("selected", "") + f.get("after", "")
 
 
 def gather(cfg):
@@ -12,13 +30,30 @@ def gather(cfg):
     return {"app": app, "title": title, "tone": brain.tone_for(app, cfg)}
 
 
-def read_field(cfg, on_rect=None, text=True):
+class Verdict:
+    """The IsPassword answer, published the moment UIA has it (long before the text read finishes). value: True, False, or
+    None = not (yet) known. wait() blocks on this alone, so a slow text read never delays or blurs the decision."""
+
+    def __init__(self):
+        self._event, self.value = threading.Event(), None
+
+    def publish(self, value):
+        if not self._event.is_set():
+            self.value = value
+            self._event.set()
+
+    def wait(self, timeout):
+        self._event.wait(timeout)
+        return self.value
+
+
+def read_field(cfg, on_rect=None, text=True, verdict=None):
     """Text around the caret in the focused control: {before, after, selected, sel_known} or {} on any failure.
 
     Uses UI Automation (TextPattern, then ValuePattern with the caret treated as end-of-field). sel_known is True only
     when a TextPattern answered, so an empty `selected` is then authoritative ("nothing selected"); False means UIA
     could not tell and a clipboard fallback is the only way to look (callers must not use it merely because this
-    read has not finished). Run it in a daemon thread with a short join: UIA can hang on some apps.
+    read has not finished). `verdict` (a Verdict) gets the IsPassword answer as soon as it is known, None if UIA failed. Run it in a daemon thread with a short join: UIA can hang on some apps.
     on_rect((l, t, r, b), kind) gets the card anchor (kind "caret" | "field" | "pane", see card.pick_rect): from the
     cheap line rect before the text read, else from the slower providers after it. text=False reads the rect only
     (terminal apps: scrollback must not reach prompts).
@@ -30,14 +65,29 @@ def read_field(cfg, on_rect=None, text=True):
     try:
         import uiautomation as auto
         with auto.UIAutomationInitializerInThread():
-            return _read(auto, c, on_rect, want_text)
+            return _read(auto, ReadOpts(c, on_rect, want_text, thread_cap(cfg, want_text), verdict))
     except Exception as e:
         log.debug("read_field failed: %s", e)
+        if verdict:
+            verdict.publish(None)  # UIA couldn't answer: the caller must assume the worst
         return {}
 
 
-def _read(auto, c, on_rect, want_text):
+ReadOpts = namedtuple("ReadOpts", "c on_rect want_text thread verdict", defaults=({}, None, True, 0, None))  # what one read should do
+
+
+def _read(auto, opts):
+    c, on_rect, want_text, thread, verdict = opts
     ctl = auto.GetFocusedControl()
+    password = _is_password(ctl)
+    if verdict:
+        verdict.publish(password)
+    if password:  # geometry for the card only: never read, keep or return any text from a password field
+        rect = _control_rect(ctl) if on_rect else None
+        if rect:
+            _anchor(on_rect, [], rect, force=True)
+        del ctl
+        return {"password": True}
     rect = _control_rect(ctl) if on_rect else None
     sel = _selection_range(auto, ctl) if rect else None
     anchored = bool(rect) and _anchor(on_rect, [lambda: _line_rect(auto, sel)], rect)
@@ -45,9 +95,97 @@ def _read(auto, c, on_rect, want_text):
     if rect and not anchored:
         _anchor(on_rect, [lambda: _point_rect(auto, sel), lambda: _caret2_rect(auto, ctl), _msaa_caret, win.caret_rect], rect, force=True)
     meta = {"control_name": _control_name(ctl)}
+    if thread and out:
+        meta["thread"] = thread_text(ctl, thread)
     del ctl, sel  # no COM object may outlive the initializer
     n, m = c.get("before_chars", 600), c.get("after_chars", 200)
     return {**meta, "before": out[0][-n:], "after": out[1][:m], "selected": out[2], "sel_known": out[3]} if out else meta
+
+
+THREAD_TYPES = {"TextControl", "ListItemControl", "DocumentControl"}
+THREAD_NODES, THREAD_BUDGET_S = 200, 0.15
+
+
+def thread_cap(cfg, want_text):
+    """Chars of conversation context to collect, 0 = none. Needs [context] thread, a readable (not no_copy, not password) field,
+    and NO reachable remote provider: this text is only ever sent to a model on this machine."""
+    c = cfg.get("context", {})
+    return c.get("thread_chars", 600) if c.get("thread") and want_text and store.local_only(cfg) else 0
+
+
+def select_thread(nodes, input_top, cap):
+    """nodes = [(top, bottom, text)]. Keep text sitting entirely above the input, take the bottom-most until `cap` chars,
+    and return it in reading order (top to bottom). Pure."""
+    above = sorted((n for n in nodes if n[1] <= input_top and n[2].strip()), key=lambda n: (n[1], n[0]))
+    out, total, seen = [], 0, set()
+    for _, _, text in reversed(above):
+        t = " ".join(text.split())
+        if t in seen:
+            continue
+        seen.add(t)
+        if total + len(t) > cap:
+            if not out:
+                out.append(t[-cap:])  # one long message: keep its tail
+            break
+        out.append(t); total += len(t) + 1
+    return " ".join(reversed(out))
+
+
+def _top_ancestor(ctl, levels=4):
+    """The ancestor `levels` up (or the highest there is)."""
+    root = ctl
+    for _ in range(levels):
+        parent = root.GetParentControl()
+        if not parent:
+            break
+        root = parent
+    return root
+
+
+def _thread_node(c):
+    """(top, bottom, text) for a Text/ListItem/Document control that has a name and a real rect, else None."""
+    if c.ControlTypeName not in THREAD_TYPES or not c.Name:
+        return None
+    r = c.BoundingRectangle
+    return (r.top, r.bottom, c.Name) if r.bottom > r.top and r.right > r.left else None
+
+
+def _walk_nodes(root, now, nodes):
+    """Breadth-first over the descendants into `nodes` (so a failure keeps what was found): at most THREAD_NODES controls and
+    THREAD_BUDGET_S seconds."""
+    deadline, queue, seen = now() + THREAD_BUDGET_S, [root], 0
+    while queue and seen < THREAD_NODES and now() < deadline:
+        c = queue.pop(0); seen += 1
+        if node := _thread_node(c):
+            nodes.append(node)
+        queue.extend(c.GetChildren() or [])
+
+
+def collect_thread(ctl, now=time.monotonic):
+    """[(top, bottom, text)] of Text/ListItem/Document controls near the focused input: walk up <= 4 ancestors, then
+    breadth-first through the descendants (<= 200 nodes, 150 ms). Never raises."""
+    nodes = []
+    try:
+        _walk_nodes(_top_ancestor(ctl), now, nodes)
+    except Exception as e:
+        log.debug("thread collect stopped: %s", e)
+    return nodes
+
+
+def thread_text(ctl, cap):
+    """Recent conversation text above the focused input (reference for names and tone), '' if none."""
+    try:
+        return select_thread(collect_thread(ctl), ctl.BoundingRectangle.top, cap)
+    except Exception:
+        return ""
+
+
+def _is_password(ctl):
+    """UIA says the focused control is a password edit. Any failure reads as not-a-password (UIA is the only signal we have)."""
+    try:
+        return bool(ctl.IsPassword)
+    except Exception:
+        return False
 
 
 def _control_name(ctl):

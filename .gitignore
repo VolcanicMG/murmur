@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 *.spec.bak
+evals/cases/local/
+evals/results/*
+!evals/results/.gitkeep

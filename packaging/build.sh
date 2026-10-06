@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
-# Build murmur.exe from WSL. PyInstaller must run as a Windows process (Windows venv python via interop);
+# Build the murmur onedir app from WSL and install it. PyInstaller must run as a Windows process (Windows venv python via interop);
 # the build is staged on the Windows filesystem because the \\wsl$ share is slow and flaky for it.
+# Result: %LOCALAPPDATA%\Programs\murmur\murmur.exe (+ _internal\) and a Desktop shortcut murmur.lnk.
 # Override paths via env, e.g. INSTALL_DIR=... ./packaging/build.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIN_PY="${WIN_PY:-/mnt/c/Users/ethan/.murmur/venv/Scripts/python.exe}"
 BUILD_DIR="${BUILD_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build}"
-INSTALL_DIR="${INSTALL_DIR:-/mnt/c/Users/ethan/AppData/Local/Programs/murmur}"  # outside OneDrive: it caches stale icons and would sync 60 MB per build
+INSTALL_DIR="${INSTALL_DIR:-/mnt/c/Users/ethan/AppData/Local/Programs/murmur}"  # outside OneDrive: it caches stale icons and would sync the folder per build
 
-echo "[1/3] Staging source + spec to $BUILD_DIR ..."
+# Safety: the clean-replace below deletes everything inside these folders, so only ever do it to folders that look like ours.
+[[ "$(basename "$BUILD_DIR")" == "murmur-build" ]] || { echo "ERROR: BUILD_DIR must end in /murmur-build (got $BUILD_DIR)" >&2; exit 1; }
+[[ "$(basename "$INSTALL_DIR")" == "murmur" ]] || { echo "ERROR: INSTALL_DIR must end in /murmur (got $INSTALL_DIR)" >&2; exit 1; }
+if [[ -d "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR")" && ! -f "$INSTALL_DIR/murmur.exe" ]]; then
+  echo "ERROR: $INSTALL_DIR is not empty and has no murmur.exe: refusing to wipe it" >&2; exit 1
+fi
+
+# Refuse to touch a running install: the exe and its _internal\ DLLs are locked while murmur runs.
+if tasklist.exe 2>/dev/null | tr -d '\r' | grep -qi '^murmur\.exe'; then
+  echo "ERROR: murmur.exe is running. Quit it from the tray (Quit murmur) and run this again." >&2
+  exit 1
+fi
+
+echo "[1/4] Staging source + spec to $BUILD_DIR ..."
 rm -rf "${BUILD_DIR:?}"
 mkdir -p "$BUILD_DIR/packaging"
 cp -r "$REPO/murmur" "$BUILD_DIR/"
@@ -18,14 +32,25 @@ cp "$REPO/packaging/entry.py" "$BUILD_DIR/packaging/"
 cp "$REPO/packaging/murmur.ico" "$REPO/packaging/icon.png" "$BUILD_DIR/packaging/"
 find "$BUILD_DIR/murmur" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
-echo "[2/3] Running PyInstaller (Windows Python) ..."
+echo "[2/4] Running PyInstaller (Windows Python) ..."
 start=$(date +%s)
 ( cd "$BUILD_DIR" && "$WIN_PY" -m PyInstaller --noconfirm --clean --distpath dist --workpath build murmur.spec )
 echo "build time: $(( $(date +%s) - start ))s"
 
-echo "[3/3] Delivering exe ..."
-OUT="$BUILD_DIR/dist/murmur.exe"
-[[ -f "$OUT" ]] || { echo "ERROR: build produced no exe at $OUT"; exit 1; }
+OUT="$BUILD_DIR/dist/murmur"
+[[ -f "$OUT/murmur.exe" && -d "$OUT/_internal" ]] || { echo "ERROR: build produced no onedir app at $OUT"; exit 1; }
+
+echo "[3/4] Installing to $INSTALL_DIR (clean replace; user data lives in ~/.murmur, never here) ..."
 mkdir -p "$INSTALL_DIR"
-cp "$OUT" "$INSTALL_DIR/murmur.exe"
-echo "DONE. Size: $(du -h "$OUT" | cut -f1)  ->  $INSTALL_DIR/murmur.exe"
+find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+cp -r "$OUT"/. "$INSTALL_DIR"/
+
+echo "[4/4] Desktop shortcut ..."
+WIN_EXE="$(wslpath -w "$INSTALL_DIR/murmur.exe")"
+powershell.exe -NoProfile -Command "
+  \$exe = '$WIN_EXE'
+  \$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'murmur.lnk'
+  \$s = (New-Object -ComObject WScript.Shell).CreateShortcut(\$lnk)
+  \$s.TargetPath = \$exe; \$s.WorkingDirectory = Split-Path \$exe; \$s.IconLocation = \$exe + ',0'; \$s.Description = 'murmur'
+  \$s.Save(); Write-Output \"shortcut: \$lnk\"" | tr -d '\r'
+echo "DONE. Size: $(du -sh "$INSTALL_DIR" | cut -f1)  ->  $INSTALL_DIR/murmur.exe"

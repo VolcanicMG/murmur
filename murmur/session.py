@@ -4,7 +4,7 @@ import keyboard
 from datetime import datetime
 import numpy as np
 import sounddevice as sd
-from . import brain, capture, context, cues, llm, store, stt, win, workspace
+from . import autolearn, brain, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
 
 log = logging.getLogger("murmur")
 UNDO_WINDOW = 60  # seconds after our last paste during which "scratch that" sends ctrl+z
@@ -31,6 +31,7 @@ class Session:
         self.mode, self.cfg, self.ov = mode, cfg, ov
         self.held, self.stop, self.current, self.done, self.mark = hooks.held, hooks.stop, hooks.current, hooks.done, hooks.mark
         self.retry = hooks.retry
+        self.live = getattr(hooks, "live", lambda: False)  # is any session running (deferred background work waits)
         self.pasted, self.last_paste = hooks.pasted, hooks.last_paste  # (time, app, text) of the last paste lives in app state across sessions
         self.stream, self.buf = None, []
         self.raw, self.cleaned, self.inflight = "", ("", "", False, True), (None, None)  # cleaned = (raw, text, had_ctx, plausible); inflight = (raw, Event)
@@ -40,7 +41,8 @@ class Session:
         self.selection, self.target, self.trailing, self.pasted_ok = "", "new", "", False
         self.latched, self.vad, self.vad_decision, self.label, self.route = False, capture.vad_new(), None, None, "primary"
         self.committed, self.tag_index, self.silent = "", None, False
-        self.rms, self.live_route = [], "primary"  # per-block RMS aligned with buf (forced segment cuts); route of the live clean  # committed = text of already-transcribed long-dictation segments
+        self.verdict, self._pw, self._unknown = context.Verdict(), None, False  # password verdict: published early, frozen at release
+        self.rms, self.live_route, self.hint = [], "primary", ""  # per-block RMS aligned with buf (forced segment cuts); route of the live clean; the card hint
 
     def _cue(self, name):
         """Audio cue (async, honours [ui] sounds); never raises."""
@@ -79,6 +81,7 @@ class Session:
                 return
             self._poll_loop()
             self.stream.stop()
+            self.t_end = time.time()  # recording length for the speaking metrics
             if self.cancelled or time.time() - self.t0 < 0.3:
                 return
             self.raw = self._compose(transcribe(self.buf))
@@ -95,10 +98,14 @@ class Session:
                 self._cue("cancel")
                 self._post(lambda: self.ov.state("nothing", "Scratched.", label="Scratched"))  # whole utterance scratched
                 return
+            self._decide_password()
             self.reader.join(1.0 if self.mode == "command" else 0.4)  # never block dictation on UIA
+            if self.sensitive:
+                where = "a password field" if self.password else "this field"
+                self._post(lambda: setattr(self.ov, "dest", f"{where} \u00b7 not saved"))
             self.mark("polishing")
             final = self._finish_command() if self.mode == "command" else self._finish_dictate()
-            if final and self.mode == "dictate":
+            if final and self.mode == "dictate" and not self.sensitive:
                 final = brain.fit(self._tag_files(final), self.ctx.get("before", ""), self.ctx.get("tone"))
             if final and not self.cancelled:
                 self._paste_and_log(final)
@@ -154,6 +161,10 @@ class Session:
         if self.cancelled and not self.silent:
             self._cue("cancel")  # Esc
         self.done(); self.mark("error" if self.failed else "idle"); self._post(self.ov.release)
+        try:
+            autolearn.maybe_refresh_style(self.cfg, self.live)
+        except Exception:
+            log.exception("style refresh check failed")
 
     def _audio(self, d, *_):
         rms = self.ov.level = float(np.sqrt(np.mean(d * d)))
@@ -188,7 +199,7 @@ class Session:
         self.t0 = time.time()
         self._cue("start")
         self.mark("recording")
-        self.ctx = {"cfg": self.cfg, **context.gather(self.cfg)}
+        self.ctx = {"cfg": self.cfg, "private": True, **context.gather(self.cfg)}  # logs stay redacted until UIA clears the field
         self.reader = threading.Thread(target=self._read_field, daemon=True)
         self.reader.start()  # UIA off the hotkey/Tk threads; live clean uses whatever has arrived
         self.app, self.title = self.ctx["app"], self.ctx["title"]
@@ -198,7 +209,14 @@ class Session:
 
     def _read_field(self):
         text_ok = self.app not in store.no_copy(self.cfg)  # terminal scrollback must not go into prompts
-        self.ctx.update(context.read_field(self.cfg, on_rect=self._anchor, text=text_ok))
+        self.ctx.update(context.read_field(context.wide(self.cfg), on_rect=self._anchor, text=text_ok, verdict=self.verdict))  # prompts still slice to [context] chars
+        if self.verdict.value is False:
+            self.ctx["private"] = store.is_private(self.cfg)
+        if text_ok and self.verdict.value is False and "before" in self.ctx:
+            try:  # (a) a hand edit of the last paste is visible now: learn from it
+                autolearn.check_and_apply(self.app, self.ctx["before"] + self.ctx.get("selected", "") + self.ctx.get("after", ""), self.cfg)
+            except Exception:
+                log.exception("auto-learn check failed")
         if self.mode == "dictate" and self.cfg.get("code", {}).get("file_tags", "chat") != "off":
             try:
                 if roots := workspace.roots_for(self.app, self.title, self.cfg):
@@ -244,6 +262,11 @@ class Session:
         """Tk thread: raw words stream into the card, the last one dimmed as still changing."""
         if not self.current():
             return
+        if self.guarded:  # a password field, or UIA hasn't said it isn't one yet: never put the spoken words on screen
+            self.ov.transcript("\u2022" * min(len(r.split()) * 3, 24), "")
+            if self.ov.st == "listening":
+                self.ov.state("transcribing", label=self.label)
+            return
         if self.mode == "command":
             self.ov.transcript(f"\u201c{r}\u201d", "")
             return
@@ -252,16 +275,62 @@ class Session:
         if self.ov.st == "listening":
             self.ov.state("transcribing", label=self.label)
 
+    def _prep(self, r):
+        """Transcript -> text to clean: the deterministic pre-pass (scratch cues, number corrections, breaks, addresses), then
+        sounds-like dictionary matches swapped in (weaker ones become prompt hints). No dictionary matching for sensitive fields."""
+        terms = None
+        if not self.sensitive and store.learning(self.cfg, "phonetic"):
+            terms = store.load_dictionary() + list(self.ctx.get("terms", []))
+        w, hard = brain.prepare(r, self.ctx, terms)
+        if hard:
+            log.info("phonetic: %s", f"{len(hard)} replacement(s)" if self.private else ", ".join(f"{a} -> {b}" for a, b in hard))
+        return w
+
+    PW_WAIT = 1.5  # seconds to wait for the IsPassword verdict at release
+
+    @property
+    def password(self):
+        """UIA said the focused control is a password field. Frozen by _decide_password at release; before that, what UIA has
+        published so far."""
+        return self._pw if self._pw is not None else self.verdict.value is True
+
+    @property
+    def sensitive(self):
+        """A password field, or a field whose verdict never arrived: private AND local-only (no history, learning, phonetic
+        matching, file tags, clipboard or remote LLM; typed delivery)."""
+        return self.password or self._unknown
+
+    @property
+    def guarded(self):
+        """Don't show or send the words yet: sensitive, or UIA has not said this is NOT a password field."""
+        return self.sensitive or (self._pw is None and self.verdict.value is not False)
+
+    @property
+    def private(self):
+        """Private mode (or a sensitive field): nothing is written to history and nothing is learned."""
+        return store.is_private(self.cfg) or self.sensitive
+
+    def _decide_password(self):
+        """Wait (<= 1.5 s, on the verdict alone) for IsPassword, then freeze the decision for the rest of the session. An answer
+        that never comes counts as a sensitive field kept local: no remote provider is reachable from here on."""
+        v = self.verdict.wait(self.PW_WAIT)
+        self._pw, self._unknown = v is True, v is None
+        self.ctx["private"] = self.private  # brain's rejection log keys off this
+        if self._unknown:
+            log.info("password check unknown: this session stays private and local")
+            self.ctx["cfg"] = {**self.cfg, "llm": {**self.cfg["llm"], "fallback": False}}
+
     def _maybe_live(self, r):
         idle = self.inflight[1] is None or self.inflight[1].is_set()
-        if self.mode == "dictate" and self.cfg["llm"]["live_clean"] and idle:
+        # never send the transcript to the LLM before UIA has said it is NOT a password field
+        if self.mode == "dictate" and self.cfg["llm"]["live_clean"] and idle and not self.guarded:
             self.inflight = (r, threading.Event())
             threading.Thread(target=self._live, args=self.inflight, daemon=True).start()
 
     def _live(self, r, ev):
         try:
             had_ctx = "before" in self.ctx  # a context-less result must not be reused once context arrives
-            w = brain.apply_scratch(r)
+            w = self._prep(r)
             if not w:  # everything scratched: nothing to clean
                 self.cleaned = (r, "", had_ctx, True)
                 return
@@ -275,14 +344,18 @@ class Session:
 
     def _finish_dictate(self):
         raw = self.raw
+        if self.password:  # no LLM, no cleanup, no context: the words as heard go straight into the field
+            return brain.password_text(raw)
+        if self._unknown and not store.provider_is_local(self.cfg["llm"]):
+            return raw.strip()  # unverified field and no local model: keep it off every remote provider
         shown = self.cleaned[1] if self.cleaned[0] == raw else raw
         self._post(lambda: self.ov.state("polishing", shown))
-        n = len(brain.split_chunks(brain.apply_scratch(raw)))
+        n = len(brain.split_chunks(self._prep(raw)))
         timeout = wait_cap(self.cfg, n)
         if n <= 1 and self.cleaned[0] != raw and self.inflight[0] == raw:
             self._wait(self.inflight[1], timeout)  # reuse the in-flight request
         if self.paste_now or self.cancelled:
-            return brain.apply_scratch(raw)
+            return self._prep(raw)
         if n <= 1 and self.cleaned[0] == raw and self.cleaned[2] == ("before" in self.ctx):
             self.route = self.live_route
             self.kept_raw = not self.cleaned[3]
@@ -291,16 +364,16 @@ class Session:
         threading.Thread(target=self._clean_into, args=(raw, box, done), daemon=True).start()
         self._wait(done, timeout)
         if not box:  # interrupted by Enter/Esc (raw is what the user asked for) or still running
-            return brain.apply_scratch(raw)
+            return self._prep(raw)
         if box[0] is None:
             self.degraded = True
-            return brain.apply_scratch(raw)
+            return self._prep(raw)
         self.kept_raw = not box[0][1]
         return box[0][0]
 
     def _clean_into(self, raw, box, done):
         try:
-            box.append(brain.clean_auto(brain.apply_scratch(raw), self.ctx))
+            box.append(brain.clean_auto(self._prep(raw), self.ctx))
             self.route = llm.route()  # this call's route (thread-local), not a global
         except Exception as e:
             log.info("clean failed, pasting raw: %s", e)
@@ -374,6 +447,10 @@ class Session:
         return kind in ("rewrite", "scratch") or (kind == "learn" and arg is None) or (kind == "undo" and "delete" in self.raw.lower())
 
     def _finish_command(self):
+        if self.password:
+            self._cue("error")
+            self._post(lambda: self.ov.state("offline", "Not available in password fields.", label="Password field"))
+            return None
         if self.reader.is_alive() and self._needs_selection():  # UIA hasn't answered: pasting could replace a selection we never saw
             self._cue("error")
             self._post(lambda: self.ov.state("offline", "Couldn't read the selection \u2014 try again.", label="Not read"))
@@ -404,7 +481,7 @@ class Session:
         except Exception as e:
             log.info("rewrite failed: %s", e)  # pasting would clobber the selection
             self._cue("error")
-            self._post(lambda: self.ov.state("offline", "Rewrite failed; LM Studio is unavailable."))
+            self._post(lambda: self.ov.state("offline", "Rewrite failed; the cleanup model is unavailable."))
             self.cancelled = True  # nothing to paste
             return None
         if self.target == "new":
@@ -413,42 +490,65 @@ class Session:
 
     def _deliver(self, final):
         """Insert into the app we started in; if it changed or insertion fails, leave the text on the clipboard."""
+        cfg = {**self.cfg, "output": {"method": "type"}} if self.sensitive else self.cfg  # typed, so it never touches the clipboard
         try:
             if win.active_app()[0] == self.app:
-                win.insert(final, self.cfg)
+                win.insert(final, cfg)
                 return True
         except Exception:
             log.exception("insert failed")
-        win.to_clipboard(final)
+        if not self.sensitive:
+            win.to_clipboard(final)
         return False
 
     def _paste_and_log(self, final):
-        prev = (store.read_history(1) or [None])[-1]
+        prev = (store.read_history(1) or [None])[-1] if not self.private else None
         if not self._deliver(final):
             self._cue("error")
             self._post(lambda: self.ov.state("paste_failed"))
             return
         self._cue("error" if self.degraded or self.kept_raw else "done")
         self.pasted_ok = True
-        self.pasted(self.app, final.strip())
+        self.pasted(self.app, "" if self.sensitive else final.strip())  # a password is never kept for "edit last"
+        if self.private:
+            self._post(lambda: self._show_outcome(final))
+            return
         entry = {"ts": datetime.now().isoformat(timespec="seconds"), "app": self.app, "title": self.title,
                  "tone": self.ctx["tone"], "mode": self.mode, "raw": self.raw, "final": final}
         if self.mode == "command":
             entry["selection"], entry["target"] = self.selection, self.target
+        else:  # speaking metrics from the heard transcript (never reached for private or sensitive rows)
+            entry.update(speech.capture_fields(self.raw, (getattr(self, "t_end", time.time()) - self.t0) if hasattr(self, "t0") else 0.0, self.vad))
+            self.hint = speech.hint(entry, self.cfg.get("coach", {}).get("goals", [])) if self.cfg.get("coach", {}).get("card_hint") else ""
         store.append_history(entry)
+        if self.mode == "dictate":
+            self._adapt(entry, final)
         self._learn_from_redictation(prev, final)
         self._post(lambda: self._show_outcome(final))
 
+    def _adapt(self, entry, final):
+        """Feed the learners after a dictate paste (never reached in private mode or for password fields)."""
+        try:
+            autolearn.remember(autolearn.Paste(self.app, self.title, final, entry["ts"], final))
+            autolearn.count_dictation()
+            autolearn.schedule(self.cfg, self.app, self.live, context.read_text)  # (b) the delayed check
+        except Exception:
+            log.exception("adapt hooks failed")
+
     def _show_outcome(self, final):
-        if self.degraded:
-            self.ov.state("offline")
+        if self.sensitive:  # never show a password back on the card
+            self.ov.state("pasted", "Typed into a password field \u00b7 not saved" if self.password else "Typed \u00b7 not saved")
+        elif self.degraded:
+            starting = store.runtime.get("llm_starting")  # the bundled model was still coming up when this dictation finished
+            self.ov.state("offline", label="Model starting\u2026" if starting else None)
         elif self.kept_raw:
             self.ov.state("offline", "Kept your words; cleanup looked wrong.", label="Kept raw")
         elif self.mode == "command":
             n = final.count("\n") + 1
             self.ov.state("done", f"Rewrote {n} line{'s' if n != 1 else ''}")
         else:
-            self.ov.state("pasted", final, label="Pasted \u00b7 fallback" if self.route == "fallback" else None)
+            parts = ["Pasted"] + (["fallback"] if self.route == "fallback" else []) + ([self.hint] if self.hint else [])
+            self.ov.state("pasted", final, label=" \u00b7 ".join(parts) if len(parts) > 1 else None)
 
     def _learn_from_redictation(self, prev, final):
         """A near-identical dictation soon after the last one is a correction: learn the changed terms."""

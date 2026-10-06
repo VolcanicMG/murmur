@@ -26,7 +26,7 @@ STATES = {
               "No microphone detected. Plug one in or pick another input in Settings.", False),
     "loading": ("Loading model", SECONDARY, TEXT, "grey", False, False, None,
                 "First run downloads the speech model (~600 MB)\u2026", False),
-    "offline": ("LM Studio offline", ERROR, TEXT, "grey", False, False, 2400,
+    "offline": ("Model offline", ERROR, TEXT, "grey", False, False, 2400,
                 "Pasted the raw transcript; cleanup unavailable.", False),
     "paste_failed": ("Couldn't paste", ERROR, TEXT, "grey", False, False, 2800,
                      "The target field was lost. Text is on your clipboard.", False),

@@ -54,3 +54,24 @@ def tray_image(state, size=64):
         d.ellipse((176, 0, 255, 79), fill=(0, 0, 0, 0))
         d.ellipse((190, 14, 242, 66), fill=_rgb(TEXT) + (255,))
     return im.resize((size, size), Image.LANCZOS)
+
+
+def tooltip(state, key, private=False):
+    """Tray tooltip for `state`; private mode adds a suffix."""
+    return TOOLTIPS[state].format(key=key) + (" \u00b7 private" if private else "")
+
+
+def extra_items(app, open_about=None):
+    """pystray MenuItems for the logic worker's tray hooks, to splice into the menu (`*tray.extra_items(app_module, cb)`).
+    Each item exists only when `app` has the callable: toggle_private() (+ optional is_private()), exclude_current(). open_about(icon, item)
+    adds "About murmur"."""
+    import pystray
+    items = []
+    toggle, is_private, exclude = (getattr(app, n, None) for n in ("toggle_private", "is_private", "exclude_current"))
+    if toggle:
+        items.append(pystray.MenuItem("Private mode", lambda i, it: toggle(), checked=(lambda it: bool(is_private())) if is_private else None))
+    if exclude:
+        items.append(pystray.MenuItem("Don't use murmur in this app", lambda i, it: exclude()))
+    if open_about:
+        items.append(pystray.MenuItem("About murmur", open_about))
+    return items

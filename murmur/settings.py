@@ -7,17 +7,23 @@ from types import SimpleNamespace
 import pyperclip
 from . import cues, render, store, win
 from .theme import ACCENT, CMD_TEXT, ERROR, FIELD, FILL, HAIR, INPUT, NAME, ON_ACCENT, SECONDARY, SEL, SIDEBAR, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts
+from .devices import DEFAULT_MIC, HotkeyField, MicField, input_devices
 from .inputs import Select, TextField, frame_text
 from .widgets import Scrollbar, wheel_scroll, Chip, Pill, Tag, Tile, Toggle, photo, pill, put
 
 SECTIONS = {
     "History": "Everything murmur has typed for you, dictation and commands. Fix a row to teach it new spellings.",
+    "Speech": "How you speak, measured from what murmur heard, not from the cleaned text.",
     "Dictionary": "Preferred spellings. Cleanup is nudged toward these words.",
     "Snippets": "Say \u201cinsert <name>\u201d to expand a snippet.",
     "Prompt": "The cleanup rules sent to the LLM with every dictation.",
     "Tones": "How murmur writes in each kind of app. Map apps to tones in Config.",
     "Config": "Hotkeys, models and apps. Advanced holds the raw config.toml.",
+    "About": "Version, where things live, and the log.",
 }
+LIVE_HOTKEYS = True  # app.rebind_hotkeys exists: a saved hotkey change applies in the running tray; "restart" wording only without one
+RESTART_NOTE = "Hotkey changes apply after restart."
+EXTRA_INT = ("privacy.history_days", "learning.style_every", "context.thread_chars")  # whole-number keys store.INT_KEYS may not know yet
 
 
 def icon_path():
@@ -51,123 +57,6 @@ class Status(tk.Frame):
         if text:
             put(self.dot, render.circle(self.ui.k(8), col), 0, 0)
         self.label.config(text=text, fg=col if kind or text else SECONDARY)
-
-
-DEFAULT_MIC = "System default"
-
-
-def input_devices():
-    """Input device labels "<name> (<hostapi>)", de-duplicated, as [(label, name)]; sounddevice imported lazily (Linux tests)."""
-    import sounddevice as sd
-    apis, seen, out = sd.query_hostapis(), set(), []
-    for d in sd.query_devices():
-        label = f"{d['name']} ({apis[d['hostapi']]['name']})"
-        if d["max_input_channels"] > 0 and label not in seen:
-            seen.add(label); out.append((label, d["name"]))
-    return out
-
-
-class MicField(tk.Frame):
-    """Input-device Select plus Test mic (1.5 s on a worker thread, peak level to the status line). Stores the device NAME."""
-
-    def __init__(self, parent, ui, status):
-        super().__init__(parent, bg=parent.cget("bg"))
-        self.status, self.q, self.names = status, queue.Queue(), {DEFAULT_MIC: ""}
-        try:
-            devs = input_devices()
-        except Exception:
-            devs = []
-        self.names.update(devs)
-        self.sel = Select(self, ui, list(self.names)); self.sel.pack(side="left")
-        Pill(self, ui, "Test mic", self.test).pack(side="left", padx=(ui.k(8), 0))
-
-    def get(self):
-        return self.names.get(self.sel.get(), "")
-
-    def set(self, name):
-        label = next((l for l, n in self.names.items() if n == name), None)
-        if label is None and name:  # configured device not present now: keep it selectable so a save doesn't drop it
-            label = f"{name} (not found)"; self.names[label] = name; self.sel.reset(list(self.names))
-        self.sel.set(label or DEFAULT_MIC)
-
-    def test(self):
-        self.status.set("Listening for 1.5 s\u2026", "info")
-        threading.Thread(target=self._rec, args=(self.get(),), daemon=True).start()
-        self.after(100, self._poll)
-
-    def _rec(self, name):
-        try:
-            import sounddevice as sd
-            idx = store.resolve_device(name, sd.query_devices())
-            data = sd.rec(int(1.5 * 16000), samplerate=16000, channels=1, dtype="float32", device=idx, blocking=True)
-            self.q.put(float(abs(data).max()))
-        except Exception as e:
-            self.q.put(e)
-
-    def _poll(self):
-        if not self.winfo_exists():
-            return
-        try:
-            res = self.q.get_nowait()
-        except queue.Empty:
-            self.after(100, self._poll); return
-        if isinstance(res, Exception):
-            self.status.set(f"Can't open the input: {res}", "error")
-        elif res < 0.01:
-            self.status.set("No signal \u2014 check the input", "error")
-        else:
-            self.status.set(f"Mic ok \u00b7 peak {res:.2f}", "success")
-
-
-class HotkeyField(tk.Frame):
-    """Entry plus a Record pill: a worker thread runs keyboard.read_hotkey, the Tk side polls a queue (Esc cancels)."""
-
-    def __init__(self, parent, ui, status):
-        super().__init__(parent, bg=parent.cget("bg"))
-        self.status, self.q, self.busy = status, queue.Queue(), False
-        self.entry = TextField(self, ui, 22)
-        self.entry.pack(side="left"); Pill(self, ui, "Record", self.record).pack(side="left", padx=(ui.k(8), 0))
-
-    def get(self):
-        return self.entry.get()
-
-    def set(self, v):
-        self.entry.set(v)
-
-    def record(self):
-        if self.busy:
-            return
-        self.busy = True
-        self.status.set("Press the keys… (Esc cancels)", "info")
-        threading.Thread(target=self._read, daemon=True).start()
-        self.after(100, self._poll)
-
-    def _read(self):
-        from .app import S
-        S["capturing"] = True  # the tray's own hotkeys must ignore what is being recorded
-        try:
-            import keyboard
-            name = keyboard.read_hotkey(suppress=False)
-            self.q.put(name if "+" in name else keyboard.normalize_name(name))
-        except Exception as e:
-            self.q.put(e)
-        finally:
-            S["capturing"] = False
-
-    def _poll(self):
-        if not self.winfo_exists():
-            return
-        try:
-            res = self.q.get_nowait()
-        except queue.Empty:
-            self.after(100, self._poll); return
-        self.busy = False
-        if isinstance(res, Exception):
-            self.status.set(f"Can't record keys: {res}", "error")
-        elif res == "esc":
-            self.status.set("Recording cancelled.", "info")
-        else:
-            self.set(res); self.status.set(f"Captured {res}. Save to apply.", "info")
 
 
 class Panel(tk.Canvas):
@@ -497,8 +386,23 @@ def _reload(cfg, status, standalone):
         cfg.pop(k)
     if standalone:
         status.set("Saved. Restart murmur to apply.", "success")
-    else:
-        status.set("Saved." + (" Hotkey changes apply after restart." if cfg.get("hotkeys") != old else ""), "success")
+        return
+    note = ""
+    if cfg.get("hotkeys") != old:
+        note = _rebind(cfg)
+    status.set("Saved." + note, "success")
+
+
+def _rebind(cfg):
+    """Apply changed hotkeys to the running tray: " Hotkeys updated." when applied, else the restart wording."""
+    if LIVE_HOTKEYS:
+        try:
+            from . import app
+            if app.rebind_hotkeys(cfg):
+                return " Hotkeys updated."
+        except Exception:
+            pass
+    return " " + RESTART_NOTE
 
 
 def _tones_page(content, ui, cfg, status, after_save):
@@ -549,7 +453,8 @@ def _config_page(content, ui, status, after_save, standalone=False):
     """Form of cards over config.toml (Advanced = the raw editor); load() refills every control from disk over defaults."""
     pg = _page(content, ui, "Config", SECTIONS["Config"])
     B = SimpleNamespace(ui=ui, k=ui.k, form=_scroll_frame(pg.body), fields={}, status=status, standalone=standalone, after_save=after_save)
-    hooks = [c(B) for c in (_hotkeys_card, _dictation_card, _speech_card, _cleanup_card, _code_card, _apps_card)]  # each returns a post-load hook or None
+    cards = (_hotkeys_card, _dictation_card, _privacy_card, _learning_card, _speech_card, _cleanup_card, _code_card, _apps_card)
+    hooks = [c(B) for c in cards]  # each returns a post-load hook or None
     raw = _advanced_card(B)
 
     def load():
@@ -562,7 +467,11 @@ def _config_page(content, ui, status, after_save, standalone=False):
 
     def save_form():
         try:
-            store.save_config(store.form_to_cfg({p: w.get() for p, w in B.fields.items()}, store.load_config()))
+            values, extra = _collect(B)
+            cfg = store.form_to_cfg(values, store.load_config())
+            for path, v in extra.items():
+                cfg.setdefault(path.split(".")[0], {})[path.split(".")[1]] = v
+            store.save_config(cfg)
         except (ValueError, TypeError) as e:
             status.set(f"Not saved: {e}", "error"); return
         after_save()
@@ -572,6 +481,27 @@ def _config_page(content, ui, status, after_save, standalone=False):
     return pg, load
 
 
+def _collect(B):
+    """(values for store.form_to_cfg, extra {section.key: value} applied after it). form_to_cfg rebuilds [apps] from the table, so
+    apps.* keys and whole-number keys it doesn't validate are handled here."""
+    values = {p: w.get() for p, w in B.fields.items()}
+    extra = {p: values.pop(p) for p in [p for p in values if p.startswith("apps.")]}
+    if "exclude" in values:
+        extra["apps.exclude"] = values.pop("exclude")
+    for p in EXTRA_INT:
+        if p in values and not str(values[p]).strip():
+            values.pop(p)  # blank = key not in the config yet: leave it alone
+        elif p in values:
+            try:
+                n = int(str(values.pop(p)).strip())
+            except ValueError:
+                n = -1
+            if n < 0:
+                raise ValueError(f"{p} must be a whole number, 0 or more")
+            extra[p] = n
+    return values, extra
+
+
 def _load_field(cfg, path, w):
     """Fill one form control from the merged config."""
     if path == "apps":
@@ -579,9 +509,12 @@ def _load_field(cfg, path, w):
         w.set({a: t for a, t in cfg.get("apps", {}).items() if isinstance(t, str)}, tones)
     elif path == "no_copy":
         w.set(cfg.get("apps", {}).get("no_copy", store.NO_COPY))
+    elif path == "exclude":
+        w.set(cfg.get("apps", {}).get("exclude", []))
     else:
         sec, key = path.split(".")
-        w.set(cfg.get(sec, {}).get(key, ""))
+        v = cfg.get(sec, {}).get(key)
+        w.set(tomllib.loads(store.DEFAULT_CONFIG).get(sec, {}).get(key, "") if v is None else v)  # keys older configs lack show their default
 
 
 def _card(B, title, note=None):
@@ -625,8 +558,9 @@ def _toggle_row(B, g, path, label):
 
 
 def _hotkeys_card(B):
-    g = _grid_card(B, "Hotkeys", "Hotkey changes apply after restart." + (
-        " Recording a hotkey while murmur is running will trigger it \u2014 pause murmur from the tray first." if B.standalone else ""))
+    note = (RESTART_NOTE + " " if B.standalone or not LIVE_HOTKEYS else "") + (
+        "Recording a hotkey while murmur is running will trigger it \u2014 pause murmur from the tray first." if B.standalone else "")
+    g = _grid_card(B, "Hotkeys", note.strip() or None)
     for key, label in (("dictate", "Dictate (hold)"), ("command", "Command (hold)"), ("fix_last", "Fix last"), ("learn_word", "Learn word")):
         _row(B, g, f"hotkeys.{key}", label, HotkeyField(g, B.ui, B.status))
 
@@ -638,6 +572,7 @@ def _dictation_card(B):
     _row(B, g, "output.method", "Output method", Select(g, ui, ["paste", "type"]))
     _toggle_row(B, g, "context.enabled", "Read text around the cursor")
     _number_row(B, g, "context.before_chars", "Context before (chars)"); _number_row(B, g, "context.after_chars", "Context after (chars)")
+    _toggle_row(B, g, "context.thread", "Use nearby conversation as context"); _number_row(B, g, "context.thread_chars", "Conversation context (chars)")
     _toggle_row(B, g, "ui.startup_toast", "Startup notification")
     _toggle_row(B, g, "dictation.toggle", "Tap to toggle (hands-free)")
     _number_row(B, g, "dictation.silence_ms", "Stop after silence (ms)")
@@ -652,6 +587,25 @@ def _dictation_card(B):
     Pill(g, ui, "Test", play_test).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(vol.px + k(8), 0))  # same cell as the Select: no third column to widen the card
 
 
+def _hint(B, g, text, offset):
+    """Small secondary hint in the same grid cell as the control above it, `offset` px to its right."""
+    _label(g, B.ui, text, "small", SECONDARY, FIELD).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(offset, 0))
+
+
+def _privacy_card(B):
+    g, k = _grid_card(B, "Privacy"), B.k
+    _number_row(B, g, "privacy.history_days", "Keep history (days)"); _hint(B, g, "0 keeps everything", k(100))
+    _toggle_row(B, g, "privacy.private", "Private mode"); _hint(B, g, "Nothing is saved or learned while on", k(60))
+
+
+def _learning_card(B):
+    g, k = _grid_card(B, "Learning"), B.k
+    _toggle_row(B, g, "learning.auto_edits", "Learn from my edits"); _hint(B, g, "Spellings you fix after pasting", k(60))
+    _toggle_row(B, g, "learning.phonetic", "Phonetic matching"); _hint(B, g, "Match sound-alike words to your dictionary", k(60))
+    _toggle_row(B, g, "learning.style_auto", "Update my style automatically")
+    _number_row(B, g, "learning.style_every", "Update style every (dictations)")
+
+
 def _speech_card(B):
     g = _grid_card(B, "Speech model")
     _text_row(B, g, "stt.model", "Model"); _row(B, g, "stt.quantization", "Quantization", Select(g, B.ui, ["int8", "none"]))
@@ -659,16 +613,28 @@ def _speech_card(B):
 
 def _cleanup_card(B):
     """Cleanup model + optional fallback; returns the hook that applies provider/fallback row visibility after a load."""
+    from . import builtin
     g, ui = _grid_card(B, "Cleanup model", "The fallback sends your dictated text to that provider."), B.ui
-    provider = Select(g, ui, ["openai", "anthropic"]); _row(B, g, "llm.provider", "Provider", provider)
-    _text_row(B, g, "llm.url", "URL"); _text_row(B, g, "llm.model", "Model"); _number_row(B, g, "llm.timeout", "Timeout (s)")
+    provider = Select(g, ui, ["builtin", "openai", "anthropic"]).labelled({"builtin": "Built-in (bundled llama.cpp)"}); _row(B, g, "llm.provider", "Provider", provider)
+    url_rows = _text_row(B, g, "llm.url", "URL"); model_rows = _text_row(B, g, "llm.model", "Model"); _number_row(B, g, "llm.timeout", "Timeout (s)")
     key_row = _text_row(B, g, "llm.api_key_env", "API key env var")
     lms_rows = _text_row(B, g, "llm.lms", "LM Studio CLI") + _text_row(B, g, "llm.lms_load", "LM Studio load command")
+    backend = Select(g, ui, ["vulkan", "cuda", "cpu"]); bi_rows = list(_row(B, g, "builtin.backend", "Backend", backend))
+    bi_rows += _text_row(B, g, "builtin.model", "Model file")
+    hint = _label(g, ui, "empty = auto-detect (your models folder, then LM Studio's)", "small", SECONDARY, FIELD)
+    hint.config(wraplength=B.k(340), justify="left"); hint.grid(row=g.grid_size()[1], column=1, sticky="w"); bi_rows.append(hint)
+    status_row = builtin.build(g, ui, lambda: store.merged_config())
+    bi_label = _label(g, ui, "Status", "body", NAME, FIELD)
+    r = g.grid_size()[1]
+    bi_label.grid(row=r, column=0, sticky="nw", pady=B.k(5)); status_row.grid(row=r, column=1, sticky="w", pady=B.k(5))
+    bi_rows += [bi_label, status_row]
 
     def show_provider(*_):
-        _show_rows(key_row, provider.get() == "anthropic"); _show_rows(lms_rows, provider.get() == "openai")
+        p = provider.get()
+        _show_rows(url_rows + model_rows, p != "builtin"); _show_rows(key_row, p == "anthropic"); _show_rows(lms_rows, p == "openai")
+        _show_rows(bi_rows, p == "builtin")
     provider.var.trace_add("write", show_provider)
-    fb_on = Toggle(g, ui); _row(B, g, "llm.fallback", "Fall back to a second provider when the first is down", fb_on)
+    fb_on = Toggle(g, ui); _row(B, g, "llm.fallback", "Fall back to a second provider when the first is down", fb_on)[0].config(wraplength=B.k(190), justify="left")  # a long label must not widen the label column
     fb_prov = Select(g, ui, ["openai", "anthropic"]); fb_rows = list(_row(B, g, "llm_fallback.provider", "Provider", fb_prov))
     fb_rows += _text_row(B, g, "llm_fallback.url", "URL") + _text_row(B, g, "llm_fallback.model", "Model")
     fb_rows += _number_row(B, g, "llm_fallback.timeout", "Timeout (s)") + _text_row(B, g, "llm_fallback.api_key_env", "API key env var")
@@ -676,7 +642,10 @@ def _cleanup_card(B):
     fb_on.bind("<Button-1>", lambda e: g.after(1, show_fallback), add="+")
 
     def after_load():
+        if not backend.get():
+            backend.set("vulkan")
         provider.var.set(provider.get())  # fire the show/hide trace
+        status_row.refresh()
         show_fallback()
     return after_load
 
@@ -695,6 +664,10 @@ def _apps_card(B):
     B.fields["apps"] = AppsTable(rows, B.ui); B.fields["apps"].pack(fill="x")
     _label(rows, B.ui, "Never copy selection in (command mode)", "small", SECONDARY, FIELD).pack(anchor="w", pady=(k(14), k(4)))
     B.fields["no_copy"] = ChipList(rows, B.ui); B.fields["no_copy"].pack(fill="x")
+    _label(rows, B.ui, "Ignore murmur in", "small", SECONDARY, FIELD).pack(anchor="w", pady=(k(14), k(4)))
+    B.fields["exclude"] = ChipList(rows, B.ui); B.fields["exclude"].pack(fill="x")
+    tg = tk.Frame(rows, bg=FIELD); tg.pack(fill="x", pady=(k(12), 0)); tg.columnconfigure(0, minsize=k(210)); tg.columnconfigure(1, weight=1)
+    _toggle_row(B, tg, "apps.pause_fullscreen", "Pause in fullscreen games")
 
 
 def _advanced_card(B):
@@ -732,10 +705,9 @@ def _advanced_card(B):
     return SimpleNamespace(load=load, bind_buttons=bind_buttons)
 
 
-def open_settings(root, cfg, fix=None, standalone=False, start="History"):
-    """Open the window; `cfg` is the live config dict (updated in place on save); fix(root, row) opens the row editor."""
+def make_ui():
+    """Scale helper `k` and the shared font set (needs a Tk root to exist); also used by the setup window."""
     s = win.dpi_scale()
-    top = tk.Toplevel(root); top.title("murmur"); top.configure(bg=FILL); top.geometry(f"{round(880 * s)}x{round(600 * s)}")
     ui = SimpleNamespace(s=s, k=lambda v: round(v * s))
     ui_f, semi_f, mono_f = pick_fonts(set(tkfont.families()))
     px = lambda n: -round(n * s)
@@ -743,6 +715,15 @@ def open_settings(root, cfg, fix=None, standalone=False, start="History"):
                 "label": tkfont.Font(family=ui_f, size=px(11)), "title": tkfont.Font(family=semi_f, size=px(20)),
                 "chip": tkfont.Font(family=semi_f, size=px(13)), "pill": tkfont.Font(family=semi_f, size=px(13)),
                 "tile": tkfont.Font(family=semi_f, size=px(18)), "section": tkfont.Font(family=semi_f, size=px(14)), "mono": tkfont.Font(family=mono_f, size=px(12))}
+    return ui
+
+
+def open_settings(root, cfg, fix=None, standalone=False, **where):
+    """Open the window; `cfg` is the live config dict (updated in place on save); fix(root, row) opens the row editor.
+    where: start="History" | page="About" (same thing: the sidebar page to open on)."""
+    ui = make_ui()
+    s = ui.s
+    top = tk.Toplevel(root); top.title("murmur"); top.configure(bg=FILL); top.geometry(f"{round(880 * s)}x{round(600 * s)}")
     _style(top, ui)
     try:
         root.iconbitmap(default=str(icon_path()))  # also what the taskbar shows
@@ -763,6 +744,9 @@ def open_settings(root, cfg, fix=None, standalone=False, start="History"):
              "Snippets": (_snippets_page(content, ui), False), "Prompt": (_prompt_page(content, ui), False)}
     pages["Tones"] = (_tones_page(content, ui, cfg, status, after_save), False)
     pages["Config"] = (_config_page(content, ui, status, after_save, standalone), False)
+    from . import about, speechpage
+    pages["Speech"] = (speechpage.page(content, ui, cfg, after_save), True)
+    pages["About"] = (about.about_page(content, ui, cfg), True)
     for (pg, load), _ in pages.values():
         load()
     editors += [pages["Tones"][0][1], pages["Config"][0][1]]
@@ -781,6 +765,7 @@ def open_settings(root, cfg, fix=None, standalone=False, start="History"):
     for name in SECTIONS:
         chips[name] = Chip(side, ui, name, lambda n=name: show(n))
         chips[name].pack(fill="x", padx=ui.k(12), pady=ui.k(2))
+    start = where.get("page") or where.get("start") or "History"
     show(start if start in SECTIONS else "History")
     return top
 

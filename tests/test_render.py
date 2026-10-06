@@ -67,6 +67,15 @@ class T(unittest.TestCase):
         self.assertNotEqual(off.getpixel((8, 12)), on.getpixel((8, 12)))  # knob left when off, track left when on
         self.assertEqual(on.getpixel((35, 12))[:3], (0x16, 0x18, 0x2a))  # on-knob on the right
 
+    def test_sparkline(self):
+        im = self.r.sparkline((3, 5, 4, 8, 7), (60, 20), "#52cc95", 5)
+        self.assertEqual((im.size, im.mode), ((60, 20), "RGBA"))
+        self.assertEqual(im.getpixel((0, 0))[3] + im.getpixel((59, 19))[3] + im.getpixel((0, 19))[3], 0)  # corners clear
+        self.assertGreater(sum(1 for x in range(60) for y in range(20) if im.getpixel((x, y))[3] > 200), 30)  # the line is drawn
+        self.assertTrue(self.has_soft_edge(im))
+        self.assertEqual(max(a for *_, a in self.r.sparkline((), (30, 10), "#fff000").getdata()), 0)
+        self.assertGreater(max(a for *_, a in self.r.sparkline((4,), (30, 10), "#ffffff").getdata()), 0)  # one point = a dot
+
     def test_font(self):
         self.assertGreater(self.r.font("ui", 18).getlength("hello"), 10)
         self.assertIs(self.r.font("mono", 11), self.r.font("mono", 11))

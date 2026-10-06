@@ -1,0 +1,47 @@
+# Windows onedir build: manual (workflow_dispatch) or on a v* tag. Windows runners bill 2x: this is not run on every push.
+name: release
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements.txt -r requirements-build.txt
+      - run: python -m unittest discover tests
+      - run: ./packaging/build.ps1 -Python python
+      - run: Compress-Archive -Path dist/murmur -DestinationPath murmur-windows.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: murmur-windows
+          path: murmur-windows.zip
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: murmur-windows
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" murmur-windows.zip --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes

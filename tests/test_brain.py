@@ -292,6 +292,82 @@ class T(unittest.TestCase):
         self.assertEqual(brain.fit("app.py is it", ""), "app.py is it")
         self.assertEqual(brain.tidy_raw("hello there"), "Hello there.")
 
+    def test_number_self_correction_keeps_only_the_final_value(self):  # E1
+        a = brain.apply_scratch
+        self.assertEqual(a("bump the version to 0.43, actually 0.44, and push"), "bump the version to 0.44, and push")
+        self.assertEqual(a("bump it to zero point forty three actually zero point forty four and push"), "bump it to zero point forty four and push")
+        self.assertEqual(a("meet at three no wait four o'clock"), "meet at four o'clock")
+        self.assertEqual(a("call five I mean six people"), "call six people")
+        self.assertEqual(a("we leave on Tuesday no wait Thursday"), "we leave on Tuesday no wait Thursday")  # words are the LLM's job
+        self.assertEqual(a("it is actually fine"), "it is actually fine")
+        self.assertEqual(a("version 1.2 actually 1.3 and then 2.0 actually 2.1"), "version 1.3 and then 2.1")
+
+    def test_spoken_breaks(self):  # E2
+        a = brain.apply_scratch
+        self.assertEqual(a("first point done new paragraph second point done"), "first point done\n\nsecond point done")
+        self.assertEqual(a("First point done. New paragraph. Second point done."), "First point done.\n\nSecond point done.")
+        self.assertEqual(a("one thing new line another thing"), "one thing\nanother thing")
+        for keep in ("I wrote a new paragraph of text", "add a new line here", "the new line of code", "start a new paragraph"):
+            self.assertEqual(a(keep), keep, keep)
+        self.assertEqual(a("new paragraph"), "new paragraph")  # nothing around it: left for the LLM
+
+    def test_number_words_collapse_for_the_guard(self):  # E3
+        w = brain._words
+        self.assertEqual(w("back in nineteen ninety nine"), w("Back in 1999."))
+        self.assertEqual(w("in twenty twenty six"), ["in", "2026"])
+        self.assertEqual(w("call five five five one two three four"), w("Call 555-1234."))
+        self.assertEqual(w("five five five one two three four five six seven"), w("(555) 123-4567"))
+        self.assertEqual(w("one two three"), ["1", "2", "3"])  # a short spoken count stays separate
+        self.assertEqual(w("zero point forty four"), ["0.44"])
+        self.assertEqual(w("it costs twelve dollars and fifty cents"), w("It costs $12.50."))
+        self.assertTrue(brain.plausible("it costs twelve dollars and fifty cents", "It costs $12.50."))
+        self.assertEqual(w("twelve dollars"), ["12", "dollars"])  # no cents: unchanged
+        self.assertTrue(brain.plausible("back in nineteen ninety nine", "Back in 1999."))
+        self.assertTrue(brain.plausible("call me at five five five one two three four", "Call me at 555-1234."))
+
+    def test_spoken_addresses(self):  # E6
+        a = brain.apply_scratch
+        self.assertEqual(a("send it to john dot smith at example dot com"), "send it to john.smith@example.com")
+        self.assertEqual(a("visit double u double u double u dot example dot com slash docs"), "visit www.example.com/docs")
+        self.assertEqual(a("see example dot org slash a slash b dot html now"), "see example.org/a/b.html now")
+        self.assertEqual(a("meet me at example dot com"), "meet me at example.com")  # 'me' is not an address
+        for keep in ("the dot com bubble", "we met at the cafe", "a dot product of two vectors", "look at example dot foo"):
+            self.assertEqual(a(keep), keep, keep)
+
+    def test_code_tone_keeps_noun_phrases_as_prose(self):  # E5
+        r = brain.restore_prose_identifiers
+        code = {"tone": "code"}
+        self.assertEqual(r("set the max retry count variable to five", "Set the max_retry_count variable to 5", code), "Set the max retry count variable to 5")
+        self.assertEqual(r("set the max retry count variable to five", "Set the `max_retry_count` variable to 5", code), "Set the max retry count variable to 5")
+        self.assertEqual(r("rename user id to account id", "Rename userId to accountId", code), "Rename user id to account id")
+        # spelled, or already in the surrounding code: kept
+        self.assertEqual(r("set max underscore retry underscore count to five", "set max_retry_count to 5", code), "set max_retry_count to 5")
+        self.assertEqual(r("set the max retry count to five", "set the max_retry_count to 5", {**code, "before": "x = max_retry_count"}), "set the max_retry_count to 5")
+        self.assertEqual(r("call get user", "call get_user", code), "call get user")
+        self.assertEqual(r("set the max retry count variable to five", "Set the max_retry_count variable to 5", {"tone": "neutral"}), "Set the max_retry_count variable to 5")
+        self.assertEqual(r("use the thing here", "use foo_bar here", code), "use foo_bar here")  # the words were never spoken: untouched
+
+    def test_prepare_runs_phonetic_and_sets_hints(self):  # E4
+        ctx = {}
+        out, hard = brain.prepare("restart the cooper netties cluster at pod stead", ctx, ["Podstead", "Kubernetes"])
+        self.assertEqual(out, "restart the cooper netties cluster at Podstead")
+        self.assertEqual(hard, [("pod stead", "Podstead")])
+        self.assertEqual(ctx["hints"], [("cooper netties", "Kubernetes")])
+        self.assertIn("'cooper netties' may be 'Kubernetes'", brain._hints(ctx))  # reaches the prompt
+        self.assertIn("Possible mishearings", brain.build_system_prompt({**ctx, "cfg": store.load_config(), "tone": "neutral"}))
+        self.assertEqual(brain.prepare("hello", {}, None), ("hello", []))  # no dictionary: only the scratch pass
+
+    def test_prompt_rules_for_the_eval_findings(self):  # E1 E5 E7 E8
+        prompt, tone = store.DEFAULT_PROMPT, store.DEFAULT_TONES["code"]
+        self.assertIn("output ONLY the corrected value", prompt)
+        self.assertIn("let me think", prompt)
+        self.assertIn("in every tone", prompt)
+        self.assertIn("dates, times and amounts with digits", prompt)
+        self.assertIn("ordinary noun phrases", tone)
+        self.assertIn("clearly spells", tone)
+        self.assertIn("digits", tone)
+        self.assertIn("never both", brain._outro({}))
+
     def test_split_chunks_and_clean_auto(self):
         text = " ".join(f"Sentence number {i} is here." for i in range(120))
         chunks = brain.split_chunks(text, 1200)

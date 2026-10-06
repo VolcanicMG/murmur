@@ -1,4 +1,4 @@
-import argparse, logging, os, subprocess, sys, tempfile, time, wave
+import argparse, logging, os, subprocess, sys, tempfile, threading, time, wave
 from pathlib import Path
 import numpy as np
 from . import brain, store, stt
@@ -12,17 +12,63 @@ def setup_logging():
         logging.StreamHandler(sys.stdout), logging.FileHandler(store.HOME / "murmur.log", encoding="utf-8")])
 
 
-def start_llm(cfg):
-    """Start the LM Studio server if needed, load the configured model (never unloads), then warm it."""
+def lms_command(llm):
+    """(lms exe path or None, load command list). Empty [llm] lms / lms_load mean auto: find the CLI and build the load command."""
+    import shlex
+    lms = llm.get("lms") or store.find_lms()
+    if llm.get("lms_load"):
+        return lms, shlex.split(llm["lms_load"])
+    return lms, [lms, "load", llm["model"], "--gpu", "max", "-y", "--context-length", "8192"] if lms else []
+
+
+def _builtin_wanted(cfg):
+    """Is the bundled model the primary or the fallback provider?"""
+    from . import localllm
+    wanted = cfg["llm"].get("provider") == "builtin" or (cfg["llm"].get("fallback") and cfg.get("llm_fallback", {}).get("provider") == "builtin")
+    return bool(wanted) and localllm.enabled(cfg)
+
+
+def start_builtin(cfg):
+    """Launch the bundled llama-server and send ONE throwaway chat so a first-install shader compile (~12 s on Vulkan) isn't
+    paid by the first dictation. Runs on a daemon thread; failures are logged, the fallback path covers a dictation meanwhile."""
+    store.runtime["llm_starting"] = True
+    try:
+        from . import localllm
+        t = time.time(); localllm.start(cfg); log.info("bundled model up in %.1fs", time.time() - t)
+        t = time.time(); brain._chat(cfg, "Reply with one word.", "ping"); log.info("bundled model warm-up %.1fs", time.time() - t)
+    except Exception as e:
+        log.info("bundled model start failed: %s", e)
+    finally:
+        store.runtime["llm_starting"] = False
+
+
+def start_lm_studio(cfg):
+    """LM Studio path (provider openai): start its server if needed and load the configured model (never unloads). Without an
+    lms CLI the server steps are skipped (logged once)."""
     llm = cfg["llm"]
+    lms, load = lms_command(llm)
+    if not lms:
+        log.info("LM Studio CLI (lms) not found: skipping server/model loading; start LM Studio yourself")
+        return
+    subprocess.run([lms, "server", "start"], capture_output=True, timeout=60)  # wakes the daemon; idempotent
+    ps = subprocess.run([lms, "ps"], capture_output=True, text=True, timeout=20).stdout
+    if llm["model"] not in ps:
+        log.info("loading %s", llm["model"])
+        subprocess.run(load, timeout=300)
+
+
+def start_llm(cfg):
+    """Start whatever serves cleanup, then warm it. The bundled model starts on its own thread (its warm-up chat is part of
+    start_builtin); with a builtin primary that is all. LM Studio steps run only for provider openai; the warm-up request and the
+    offline card handle a server that isn't up."""
+    llm = cfg["llm"]
+    if _builtin_wanted(cfg):
+        threading.Thread(target=start_builtin, args=(cfg,), name="builtin-warmup", daemon=True).start()  # llm.py lets only this thread talk to a starting model
+        if llm.get("provider") == "builtin":
+            return
     try:
         if llm.get("provider", "openai") == "openai":  # lms only manages the local LM Studio
-            subprocess.run([llm["lms"], "server", "start"], capture_output=True, timeout=60)  # wakes the daemon; idempotent
-            ps = subprocess.run([llm["lms"], "ps"], capture_output=True, text=True, timeout=20).stdout
-            if llm["model"] not in ps:
-                import shlex
-                log.info("loading %s", llm["model"])
-                subprocess.run(shlex.split(llm["lms_load"]), timeout=300)
+            start_lm_studio(cfg)
         brain._chat(cfg, "Reply with one word.", "ping")
     except Exception as e:
         log.info("llm warmup failed: %s", e)
@@ -80,10 +126,15 @@ def main():
     ap.add_argument("--settings", nargs="?", const="History", metavar="TAB", help="open the settings window only (optionally on TAB)")
     ap.add_argument("--demo-card", nargs="?", const="", metavar="STATE", help="show the caption card with fake data (cycles states, or freezes STATE)")
     ap.add_argument("--demo-tray", metavar="STATE", help="save the tray icon for STATE to ~/.murmur/shots/")
+    ap.add_argument("--version", action="store_true", help="print the version and exit")
+    ap.add_argument("--setup", action="store_true", help="open the first-run setup window only")
     ap.add_argument("--selftest", action="store_true", help="transcribe+clean test.wav, no hotkeys (fresh temp HOME)")
     ap.add_argument("--real", action="store_true", help="with --selftest: use ~/.murmur instead of a fresh temp HOME")
     a = ap.parse_args()
-    store.ensure()
+    if a.version:
+        from . import __version__
+        print(__version__); return
+    first_run = store.ensure()  # True when config.toml did not exist: the tray app opens the setup window once
     if a.selftest:
         return selftest(a.real)
     if a.demo_card is not None:
@@ -95,6 +146,12 @@ def main():
         for size in (64, 16):
             tray_image(a.demo_tray, size).save(shots / f"tray-{a.demo_tray}-{size}.png")
         return
+    if a.setup:
+        try:
+            from . import setup
+        except ImportError:
+            print("setup window not available in this build"); return
+        return setup.run_standalone()
     if a.settings:
         from . import settings
         from .app import fix_last
@@ -107,12 +164,10 @@ def main():
         from . import win
         if not win.single_instance():  # tray app only: learn, --settings and --selftest return before this
             return
-    remote = cfg["llm"].get("provider", "openai") != "openai" or (
-        cfg["llm"].get("fallback") and cfg.get("llm_fallback", {}).get("provider", "openai") != "openai")
-    if cfg.get("context", {}).get("enabled", True) and remote:
+    if cfg.get("context", {}).get("enabled", True) and not store.local_only(cfg):  # "builtin" and localhost openai count as local
         log.warning("[context] enabled with a remote LLM provider (primary or fallback): text around your cursor is sent to it")
     from .app import tray_app
-    tray_app(cfg, learn, boot)
+    tray_app(cfg, learn, boot, first_run=first_run)
 
 
 if __name__ == "__main__":

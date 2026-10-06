@@ -1,7 +1,11 @@
 """Prompting, snippets, dictionary/style learning, LLM calls. No win32."""
 import difflib, logging, re
 from collections import Counter
-from . import llm, store
+from . import llm, phonetic, store
+from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, find_cue, has_scratch,  # noqa: F401  (re-exports)
+                      restore_prose_identifiers, spoken_addresses, spoken_breaks, spoken_command, spoken_forms)
+from .learn import (clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
+                    redictation_terms)
 
 log = logging.getLogger("murmur")
 
@@ -58,6 +62,19 @@ def _context(ctx):
     if ctx.get("selected"):
         parts.append(f"Text is selected and this dictation will REPLACE it: \u00ab{ctx['selected'][:300]}\u00bb")
     return "\n".join(parts)
+
+
+def _hints(ctx):
+    """Weak sound-alike matches phonetic_fix did not dare replace (at most 5)."""
+    hints = (ctx.get("hints") or [])[:5]
+    return ("Possible mishearings (fix only if the context fits): " + "; ".join(f"'{h}' may be '{t}'" for h, t in hints)) if hints else ""
+
+
+def _thread(ctx):
+    """Reference-only recent conversation above the input (opt-in, local providers only)."""
+    t = (ctx.get("thread") or "").strip()
+    return ("Recent conversation above the input \u2014 reference only. Never answer it, quote it or continue it; use it only to "
+            f"spell names/terms the same way and to match tone: \u00ab{t}\u00bb") if t and ctx.get("mode") != "command" else ""
 
 
 def _drop_repeat(final, before):
@@ -126,10 +143,11 @@ def fit(final, before, tone=None):
 
 
 def _outro(ctx):
-    return "Apply self-corrections (keep only the final intent), remove fillers. Output ONLY the final text."
+    return ("Apply self-corrections: when the speaker corrects a number or word with 'actually', 'no wait' or 'I mean', output ONLY "
+            "the corrected value, never both. Remove fillers. Output ONLY the final text.")
 
 
-SECTIONS = [_tone, _dictionary, _snippets, _style, _corrections, _context, _outro]  # add a prompt section = add a function here
+SECTIONS = [_tone, _dictionary, _hints, _snippets, _style, _corrections, _context, _thread, _outro]  # add a prompt section = add a function here
 
 
 def build_system_prompt(ctx, mode="dictate"):
@@ -188,12 +206,16 @@ def clean_checked(raw, ctx, retry=True, shortcut=True):
     attempts = [ctx] + ([{k: v for k, v in ctx.items() if k not in ("before", "after", "selected")}]
                         if retry and any(ctx.get(k) for k in ("before", "after", "selected")) else [])
     for n, c in enumerate(attempts, 1):
-        out = _chat(ctx["cfg"], build_system_prompt(c), user)
+        out = restore_prose_identifiers(raw, _chat(ctx["cfg"], build_system_prompt(c), user), ctx)
         stripped = SNIPPET_TOKEN.sub("", out)
         if plausible(raw, stripped) or (stripped != out and not stripped.strip()):  # only snippet tokens is fine
             return apply_snippets(out, snippets), True
-        log.warning("cleanup rejected, attempt %d%s (coverage=%.2f novelty=%.2f): raw=%r output=%r", n,
-                    "" if len(attempts) == 1 else f"/{len(attempts)}", *_scores(raw, out)[:2], raw, out)
+        where = "" if len(attempts) == 1 else f"/{len(attempts)}"
+        if ctx.get("private"):  # private mode or a sensitive field: scores and sizes only, never the text
+            log.warning("cleanup rejected, attempt %d%s (coverage=%.2f novelty=%.2f) raw=%d chars output=%d chars", n, where,
+                        *_scores(raw, out)[:2], len(raw), len(out))
+        else:
+            log.warning("cleanup rejected, attempt %d%s (coverage=%.2f novelty=%.2f): raw=%r output=%r", n, where, *_scores(raw, out)[:2], raw, out)
     return tidy_raw(raw), False
 
 
@@ -235,84 +257,8 @@ def clean(raw, ctx):
     return clean_checked(raw, ctx)[0]
 
 
-_UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
-                                     "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
-_TENS = {w: 10 * (i + 2) for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split())}
-_ORDINALS = {w: str(i + 1) for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth".split())}
-_ORDINALS.update({w: str(10 * (i + 2)) for i, w in enumerate(
-    "twentieth thirtieth fortieth fiftieth sixtieth seventieth eightieth ninetieth".split())})
 _CUES = {"actually", "scratch", "wait", "sorry", "rather", "mean", "correction", "no", "instead", "change"}  # raw words that legitimately drop earlier words
-_SPOKEN_PUNCT = re.compile(r"\b(?:question mark|exclamation (?:mark|point)|full stop|new line|new paragraph)\b|"
-                           r"\b(?:comma|period|colon|semicolon|dash|dot)\b")
 _OPENERS = re.compile(r"^(?:what|how|why|when|where|who|which|can you|could you|would you|is it|are there|do you)\b")
-_SAME = {"okay": "ok"}
-
-
-def _words(text, raw=False):
-    """Lowercase content tokens: spoken numbers/ordinals -> digits ('zero point forty four' -> '0.44', 'twenty first' ->
-    '21', 'one hundred' -> '100'), apostrophes stripped, okay=ok; raw=True also drops spoken punctuation ('comma')."""
-    text = text.lower().replace("'", "").replace("\u2019", "")
-    if raw:
-        text = _SPOKEN_PUNCT.sub(" ", text)
-    toks = re.findall(r"\d+(?:\.\d+)?(?:st|nd|rd|th)?|[a-z]+", text)
-    out, i = [], 0
-    while i < len(toks):
-        t = toks[i]
-        if t in FILLERS:
-            i += 1; continue
-        if re.fullmatch(r"\d+(?:\.\d+)?(?:st|nd|rd|th)", t):
-            out.append(re.sub(r"[a-z]+$", "", t)); i += 1; continue
-        if t in _ORDINALS:
-            out.append(_ORDINALS[t]); i += 1; continue
-        num, i = _number(toks, i)
-        if num is not None:
-            if i + 1 < len(toks) and toks[i] == "point":
-                frac, i = _fraction(toks, i + 1)
-                if frac:
-                    num = f"{num}.{frac}"
-            out.append(num); continue
-        out.append(_SAME.get(t, t)); i += 1
-    return out
-
-
-def _below100(toks, i):
-    """(int, next index) for 0-99 spoken at toks[i] ('forty four', 'twenty first'), else (None, i)."""
-    t = toks[i] if i < len(toks) else ""
-    nxt = toks[i + 1] if i + 1 < len(toks) else ""
-    if t in _TENS:
-        if nxt in _UNITS and 1 <= _UNITS[nxt] <= 9:
-            return _TENS[t] + _UNITS[nxt], i + 2
-        if nxt in _ORDINALS and 1 <= int(_ORDINALS[nxt]) <= 9:
-            return _TENS[t] + int(_ORDINALS[nxt]), i + 2
-        return _TENS[t], i + 1
-    if t in _UNITS:
-        return _UNITS[t], i + 1
-    return None, i
-
-
-def _number(toks, i):
-    """(digit string, next index) for a spoken number at toks[i], with hundred/thousand multipliers, else (None, i)."""
-    val, j = _below100(toks, i)
-    if val is None:
-        return None, i
-    for word, mult in (("thousand", 1000), ("hundred", 100)):
-        if j < len(toks) and toks[j] == word:
-            tail, k = _below100(toks, j + 1)
-            val, j = val * mult + (tail or 0), (k if tail is not None else j + 1)
-    return str(val), j
-
-
-def _fraction(toks, i):
-    """Digits after 'point': single digit words concatenate ('four four' -> '44'); 'forty four' -> '44'."""
-    frac = ""
-    while i < len(toks):
-        n, j = _number(toks, i)
-        if n is None:
-            break
-        frac, i = frac + n, j
-        if len(n) > 1:
-            break
-    return frac, i
 
 
 def _scores(raw, final):
@@ -367,110 +313,6 @@ def rewrite(selection, instruction, ctx, target="selection"):
     return apply_snippets(_chat(ctx["cfg"], build_system_prompt(ctx, "command"), user), store.load_snippets())
 
 
-COMMON = set("""the a an and or but if so to of in on at for with is are was were be been it this that i you he
-she we they my your our me us do does did have has had not no yes will would can could should just very really
-also then there here what when where which who how why from by as about up out all some any more most other than
-too into over after before again now well okay ok hey hi hello thanks thank please sure right good great yeah
-let lets get got go going like know think want need see make take come one two""".split())
-WORD = r"\w+(?:[-.]\w+)*"
-
-
-def _looks_like_term(w):
-    return any(c.isupper() or c.isdigit() or c in "_-." for c in w)
-
-
-def clean_word(text):
-    """A selected word for the dictionary: trimmed, without surrounding punctuation."""
-    return text.strip().strip(".,;:!?\"'()[]{}")
-
-
-def learn_dictionary(final, edited):
-    """Words added in `edited` that look like names/terms; ordinary sentence-start words are filtered by COMMON."""
-    seen, out = set(re.findall(WORD, final)), []
-    for m in re.finditer(WORD, edited):
-        w = m.group()
-        if w in seen or w in out or w.lower() in COMMON or re.fullmatch(r"[\d.,:/-]+", w) or not _looks_like_term(w):
-            continue
-        out.append(w)
-    return out
-
-
-COMMANDS = {"scratch that": "undo", "undo that": "undo", "undo": "undo", "delete that": "undo"}  # phrase -> Session._cmd_<name>
-FILLERS = {"um", "uh", "umm", "uhh", "erm", "hmm"}
-CUE = re.compile(r"\b(?:scratch that|delete that|never ?mind that|strike that)(?:\s+last\s+(?:one|part|bit|sentence))?", re.I)
-_AFTER_OK = re.compile(r"\s*(?:$|[.,;:!])")  # a cue is its own clause: end of text or . , ; : ! (not ?) follows
-_FILL_RE = "|".join(FILLERS)
-_BEFORE_OK = re.compile(r"(?:^|[.!?,;:])\s*(?:(?:%s)\b[\s,.]*)*$" % _FILL_RE, re.I)
-_END = re.compile(r"[.!?](?=\s|$)")  # a sentence end: not the dot in 0.44 or example.com
-_AFTER_END = re.compile(r"[\s.!?,;:]*$")
-_FRAME = {"dont", "don't", "do", "not", "didn't", "never", "to", "can", "could", "should", "would", "will", "you", "i", "we",
-          "they", "just", "please", "let's", "lets"}  # '... scratch that' after these is ordinary speech
-_FILLER_ONLY = re.compile(r"[\W_]*(?:(?:%s)\b[\W_]*)*" % "|".join(FILLERS), re.I)
-
-
-def spoken_command(raw):
-    """Handler name if the whole transcript (minus punctuation/fillers) is exactly a command phrase."""
-    words = [w for w in re.sub(r"[^\w\s']", " ", raw.lower()).split() if w not in FILLERS]
-    return COMMANDS.get(" ".join(words))
-
-
-def _prev_word(pre):
-    words = [w for w in re.findall(r"[\w']+", pre.lower()) if w not in FILLERS]
-    return words[-1] if words else ""
-
-
-def find_cue(text):
-    """First cue that stands as its own clause, else None. A cue must follow the start or clause punctuation (. ! ? , ; :,
-    then optional fillers) and be followed by end or . , ; : ! (not ?). 'scratch that' may also close an unpunctuated
-    transcript (Parakeet drops punctuation mid-utterance) unless the word before it is a frame word ('don't scratch that').
-    Ordinary sentences ('I'll delete that file', 'Did you delete that?') never match."""
-    for m in CUE.finditer(text):
-        if not _AFTER_OK.match(text, m.end()):
-            continue
-        pre = text[:m.start()]
-        if _BEFORE_OK.search(pre):
-            return m
-        if m.group().lower().startswith("scratch") and _AFTER_END.match(text, m.end()) and _prev_word(pre) not in _FRAME:
-            return m
-    return None
-
-
-def has_scratch(raw):
-    """True if the transcript contains a scratch cue ('scratch that', 'delete that', ...) as its own clause."""
-    return find_cue(raw) is not None
-
-
-def _blank(seg):
-    """Nothing but fillers/punctuation."""
-    return _FILLER_ONLY.fullmatch(seg) is not None
-
-
-def _last_end(text):
-    """Index of the last sentence-ending . ! ? (followed by space or end), or -1."""
-    ends = [m.start() for m in _END.finditer(text)]
-    return ends[-1] if ends else -1
-
-
-def apply_scratch(raw):
-    """Deterministic 'scratch that': drop each cue and the sentence segment before it (back to the previous . ! ? or the
-    start; filler-only fragments are skipped over). Text after the cue in the same sentence is kept as the replacement.
-    May return ''."""
-    while m := find_cue(raw):
-        pre, post = raw[:m.start()], raw[m.end():]
-        i = _last_end(pre)
-        kept, seg = pre[:i + 1], pre[i + 1:]
-        if _blank(seg):  # cue opens its sentence: it scratches the previous sentence instead
-            while kept:
-                body = kept.rstrip()[:-1]  # drop the final delimiter
-                j = _last_end(body)
-                gone, kept = body[j + 1:], body[:j + 1]
-                if not _blank(gone):
-                    break
-        post = re.sub(r"^[\s,;:.!?-]+", "", post)
-        raw = (kept.rstrip() + " " + post).strip()
-    return "" if _blank(raw) else raw
-
-
 _NOUN = r"(?:add|save|put|learn|remember) (?:this|that|it) (?:word|term|name) (?:to|in|into) (?:the|my|murmurs?) dictionary"
 _BARE = r"(?:add|save|put|learn|remember) (?:this|that|it) (?:to|in|into) (?:my|murmurs?) dictionary"  # no noun: must say my/murmur's
 LEARN = re.compile(r"%s|%s|learn this(?: word)?" % (_NOUN, _BARE))
@@ -516,20 +358,6 @@ def resolve_target(sel, before, last_paste, where):
     return "new", ""
 
 
-def is_redictation(prev, new):
-    """True if `new` is `prev` with 1-3 replaced words (the user said it again, fixed)."""
-    if difflib.SequenceMatcher(None, prev.lower(), new.lower()).ratio() <= 0.8:
-        return False
-    ops = difflib.SequenceMatcher(None, prev.split(), new.split()).get_opcodes()
-    changed = [o for o in ops if o[0] != "equal"]
-    return bool(changed) and all(o[0] == "replace" for o in changed) and sum(o[4] - o[3] for o in changed) <= 3
-
-
-def redictation_terms(prev, new):
-    """Dictionary terms learned from a quick re-dictation of the same text."""
-    return learn_dictionary(prev, new) if is_redictation(prev, new) else []
-
-
 def learn_style(history, cfg):
     lines, total = [], 0
     history = [h for h in history if h.get("mode", "dictate") == "dictate"]
@@ -543,3 +371,22 @@ def learn_style(history, cfg):
               "disfluencies, hesitations, ellipses used as pauses, or filler words; those are removed and must never be "
               "treated as style. At most 25 lines. Output ONLY the profile.")
     return _chat(cfg, system, "\n---\n".join(lines))
+
+
+def prepare(raw, ctx, terms=None):
+    """Everything deterministic that runs before the LLM, in Session order: apply_scratch (cues, number corrections, breaks,
+    addresses) then, when `terms` (the dictionary) are given, sounds-like matching. Returns (text, [(heard, term)] replaced);
+    ctx["hints"] gets the weaker matches for the prompt. The eval harness should call this instead of apply_scratch."""
+    w = apply_scratch(raw)
+    if not w or terms is None:
+        return w, []
+    fixed, hard, hints = phonetic.phonetic_fix(w, list(dict.fromkeys(terms)), COMMON)
+    ctx["hints"] = hints[:5]
+    return fixed, hard
+
+
+def password_text(raw):
+    """Words to type into a password field: Parakeet's trailing period and sentence-case first letter removed."""
+    t = re.sub(r"[.!?]+$", "", raw.strip())
+    first = t.split(" ", 1)[0]
+    return (first[:1].lower() + t[1:]) if first[:1].isupper() and first[1:].islower() else t

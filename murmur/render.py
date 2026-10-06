@@ -114,6 +114,36 @@ def chevron(size, fill, width=1.6):
     return _down(_solid(big, fill, m), size)
 
 
+@lru_cache(maxsize=128)
+def sparkline(points, size, colour, baseline=None):
+    """Trend line over `points` (tuple of numbers, oldest first; None gaps are skipped) filling `size` (w, h) px, round joins, end dot;
+    `baseline` (a value in the same units) adds a dashed horizontal guide. Empty/one-point input draws nothing/a dot."""
+    w, h = size
+    big, sw, pad = (w * SS, h * SS), 1.6 * SS, 3 * SS
+    pts = [(i, v) for i, v in enumerate(points) if v is not None]
+    img = Image.new("RGBA", big, (0, 0, 0, 0))
+    if not pts:
+        return _down(img, size)
+    vals = [v for _, v in pts] + ([baseline] if baseline is not None else [])
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1.0
+    n = max(len(points) - 1, 1)
+    y = lambda v: pad + (1 - (v - lo) / span) * (big[1] - 2 * pad)
+    xy = [(pad + i / n * (big[0] - 2 * pad), y(v)) for i, v in pts]
+    d = ImageDraw.Draw(img)
+    if baseline is not None:
+        by, x = y(baseline), pad
+        while x < big[0] - pad:
+            d.line((x, by, min(x + 4 * SS, big[0] - pad), by), fill=(255, 255, 255, 90), width=SS)
+            x += 7 * SS
+    if len(xy) > 1:
+        d.line(xy, fill=rgba(colour), width=round(sw), joint="curve")
+    for x0, y0 in (xy[0], xy[-1]) if len(xy) > 1 else xy:
+        r = sw / 2 if (x0, y0) != xy[-1] else sw * 1.3
+        d.ellipse((x0 - r, y0 - r, x0 + r, y0 + r), fill=rgba(colour))
+    return _down(img, size)
+
+
 @lru_cache(maxsize=256)
 def toggle(on, size, colours):
     """Pill switch. on: 0..1 (0.5 = mid-slide). colours: (track_off, track_on, knob_off, knob_on) as "#rrggbb"."""

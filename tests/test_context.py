@@ -40,6 +40,124 @@ def fake_auto(doc, caret, has_pattern=True):
     return auto, box
 
 
+class Password(unittest.TestCase):
+    def setUp(self):
+        self.c = load_context()
+
+    def fake(self, is_password):
+        def boom(*a, **k):
+            raise AssertionError("a password field must never be read")
+        ctl = SimpleNamespace(IsPassword=is_password, GetPattern=boom, BoundingRectangle=SimpleNamespace(left=0, top=0, right=300, bottom=30),
+                              Name="Password", ClassName="Edit", AutomationId="pw")
+        return SimpleNamespace(GetFocusedControl=lambda: ctl, PatternId=SimpleNamespace(TextPattern=1, ValuePattern=2, TextPattern2=3))
+
+    def test_password_field_returns_flag_and_reads_nothing(self):  # A1
+        got = []
+        out = self.c._read(self.fake(True), self.c.ReadOpts({}, lambda r, k: got.append((r, k)), True))
+        self.assertEqual(out, {"password": True})
+        self.assertEqual(got, [((0, 0, 300, 30), "field")])  # card geometry only
+
+    def test_verdict_is_published_before_any_text_read(self):  # R3
+        order = []
+        v = self.c.Verdict()
+        orig = v.publish
+        v.publish = lambda x: (order.append(("published", x)), orig(x))[1]
+        got = []
+        auto = self.fake(True)
+        self.c._read(auto, self.c.ReadOpts({}, None, True, 0, v))
+        self.assertEqual((v.value, order), (True, [("published", True)]))
+        self.assertTrue(v.wait(0.01))
+        slow = self.c.Verdict()
+        self.assertIsNone(slow.wait(0.01))  # a reader that never answers leaves it unknown
+        slow.publish(None); slow.publish(True)  # first answer wins
+        self.assertIsNone(slow.value)
+
+    def test_read_failure_publishes_unknown(self):
+        v = self.c.Verdict()
+        with mock.patch.dict(sys.modules, {"uiautomation": None}):  # import fails inside read_field
+            self.assertEqual(self.c.read_field({}, on_rect=lambda r, k: None, verdict=v), {})
+        self.assertTrue(v._event.is_set() and v.value is None)
+
+    def test_is_password_failure_reads_as_not_password(self):
+        self.assertFalse(self.c._is_password(SimpleNamespace()))  # no IsPassword attribute
+        self.assertTrue(self.c._is_password(SimpleNamespace(IsPassword=True)))
+
+
+class FakeCtl:
+    def __init__(self, name="", kind="TextControl", top=0, bottom=0, kids=(), parent=None):
+        self.Name, self.ControlTypeName, self._kids, self._parent = name, kind, list(kids), parent
+        self.BoundingRectangle = SimpleNamespace(top=top, bottom=bottom, left=0, right=100)
+        for k in self._kids:
+            k._parent = self
+
+    def GetChildren(self):
+        return self._kids
+
+    def GetParentControl(self):
+        return self._parent
+
+
+class Thread(unittest.TestCase):  # B4
+    def setUp(self):
+        self.c = load_context()
+
+    def tree(self, n=5):
+        msgs = [FakeCtl(f"message {i}", "ListItemControl", top=i * 20, bottom=i * 20 + 18) for i in range(n)]
+        below = FakeCtl("sidebar below the input", "TextControl", top=500, bottom=520)
+        box = FakeCtl("", "EditControl", top=400, bottom=440)
+        root = FakeCtl("", "PaneControl", kids=[FakeCtl("", "PaneControl", kids=msgs), below, box])
+        return root, box
+
+    def test_ordering_and_cap_keep_the_bottom_most_in_reading_order(self):
+        nodes = [(0, 18, "oldest message"), (20, 38, "middle message"), (40, 58, "newest message"), (500, 520, "below the input")]
+        self.assertEqual(self.c.select_thread(nodes, 400, 1000), "oldest message middle message newest message")
+        self.assertEqual(self.c.select_thread(nodes, 400, 20), "newest message")  # bottom-most first until the cap
+        self.assertEqual(self.c.select_thread([(0, 18, "x" * 100)], 400, 10), "x" * 10)  # one long message keeps its tail
+        self.assertEqual(self.c.select_thread([(0, 18, "same"), (20, 38, "same")], 400, 100), "same")  # de-duplicated
+        self.assertEqual(self.c.select_thread([(390, 410, "overlaps the input")], 400, 100), "")  # not entirely above
+
+    def test_collects_from_the_window_not_from_below_the_input(self):
+        root, box = self.tree()
+        got = self.c.thread_text(box, 1000)
+        self.assertEqual(got, "message 0 message 1 message 2 message 3 message 4")
+        self.assertNotIn("sidebar", got)
+
+    def test_time_budget_cuts_the_walk_off(self):
+        root, box = self.tree(50)
+        ticks = iter([0.0] + [0.01 * i for i in range(1, 100)])
+        nodes = self.c.collect_thread(box, now=lambda: next(ticks))
+        self.assertLess(len(nodes), 50)  # stopped at 150 ms, not after the whole tree
+        self.assertTrue(nodes)
+
+    def test_node_cap(self):
+        root, box = self.tree(300)
+        self.assertLessEqual(len(self.c.collect_thread(box)), self.c.THREAD_NODES)
+
+    def test_remote_provider_refuses(self):
+        c = self.c
+        local = {"context": {"thread": True}, "llm": {"provider": "openai", "url": "http://localhost:1234/v1/chat/completions"}}
+        self.assertEqual(c.thread_cap(local, True), 600)
+        self.assertEqual(c.thread_cap({**local, "llm": {"provider": "anthropic"}}, True), 0)
+        self.assertEqual(c.thread_cap({**local, "llm": {**local["llm"], "fallback": True}, "llm_fallback": {"provider": "anthropic"}}, True), 0)
+        self.assertEqual(c.thread_cap({**local, "llm": {**local["llm"], "fallback": True}, "llm_fallback": {"provider": "openai", "url": "http://127.0.0.1:1/v1"}}, True), 600)
+        self.assertEqual(c.thread_cap({**local, "llm": {"provider": "builtin"}}, True), 600)
+        self.assertEqual(c.thread_cap({"context": {"thread": False}, "llm": {"provider": "builtin"}}, True), 0)  # off by default
+
+    def test_no_copy_apps_and_password_fields_refuse(self):
+        local = {"context": {"thread": True}, "llm": {"provider": "builtin"}}
+        self.assertEqual(self.c.thread_cap(local, False), 0)  # text=False is what a no_copy app (terminal) passes
+        root, box = self.tree()
+        box.IsPassword = True
+        auto = SimpleNamespace(GetFocusedControl=lambda: box)
+        self.assertEqual(self.c._read(auto, self.c.ReadOpts({}, None, True, 600)), {"password": True})  # returns before any thread walk
+
+    def test_prompt_section(self):
+        from murmur import brain
+        self.assertIn("reference only", brain._thread({"thread": "hello there"}))
+        self.assertEqual(brain._thread({}), "")
+        self.assertEqual(brain._thread({"thread": "x", "mode": "command"}), "")
+
+
 class SelectBeforeCaret(unittest.TestCase):
     def setUp(self):
         self.c = load_context()

@@ -129,6 +129,18 @@ class Vad(unittest.TestCase):
         self.assertFalse(capture.should_commit(29.9, 600))
 
 
+class Ignore(unittest.TestCase):
+    def test_should_ignore(self):  # A3
+        cfg = {"apps": {"exclude": ["Game.exe"], "pause_fullscreen": True}}
+        self.assertTrue(capture.should_ignore("game.exe", cfg))  # case-insensitive
+        self.assertFalse(capture.should_ignore("code.exe", cfg, 0))
+        self.assertTrue(capture.should_ignore("code.exe", cfg, 3))  # exclusive-fullscreen D3D
+        self.assertFalse(capture.should_ignore("code.exe", cfg, 2))  # QUNS_BUSY (a non-D3D fullscreen) is not paused
+        self.assertFalse(capture.should_ignore("code.exe", {"apps": {"pause_fullscreen": False}}, 3))
+        self.assertTrue(capture.should_ignore("code.exe", {}, 3))  # default on for older configs
+        self.assertFalse(capture.should_ignore("", {}, 0))
+
+
 class Workspace(unittest.TestCase):
     def test_title_folder(self):
         f = workspace.title_folder

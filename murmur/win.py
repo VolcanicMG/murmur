@@ -2,6 +2,7 @@
 import ctypes, os, time
 from ctypes import wintypes
 import keyboard, pyperclip, win32api, win32gui, win32process
+from . import clip
 from .theme import FILL, TEXT
 
 
@@ -35,13 +36,25 @@ def active_app():
     return exe, title
 
 
+clip_snapshot, clip_restore = clip.snapshot, clip.restore  # every format, not just text
+
+
+def quns_state():
+    """SHQueryUserNotificationState (3 = a D3D exclusive-fullscreen app is in front); 0 if unavailable."""
+    try:
+        state = ctypes.c_int(0)
+        return state.value if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0 else 0
+    except Exception:
+        return 0
+
+
 def paste(text):
-    # ponytail: text-only clipboard restore; images/files on the clipboard are lost
-    old = pyperclip.paste()
-    pyperclip.copy(text)
+    snap = clip_snapshot()
+    if not clip.set_text(text):  # flagged out of clipboard history / cloud sync; plain pyperclip if that fails
+        pyperclip.copy(text)
     keyboard.send("ctrl+v")
     time.sleep(0.4)  # slow targets read the clipboard late
-    pyperclip.copy(old)
+    clip_restore(snap)
 
 
 def insert(text, cfg):
@@ -61,17 +74,19 @@ def undo():
 
 def copy_selection():
     """Selected text via ctrl+c, or None if nothing was copied."""
-    old = pyperclip.paste()
+    snap = clip_snapshot()
     pyperclip.copy("")
     keyboard.send("ctrl+c")
     time.sleep(0.3)
     got = pyperclip.paste()
-    pyperclip.copy(old)
+    clip_restore(snap)
     return got or None
 
 
 def to_clipboard(text):
-    pyperclip.copy(text)
+    """Leave our text on the clipboard (a failed delivery), flagged out of Win+V history and cloud sync."""
+    if not clip.set_text(text):
+        pyperclip.copy(text)
 
 
 def dpi_aware():

@@ -213,7 +213,7 @@ class _Popup(tk.Toplevel):
         put(cv, img, 0, 0)
         room = w - k(28 + 12) - (k(14) if self.sb else 0)
         for r in range(self.rows):
-            cv.create_text(k(28), self.pad + r * self.rh + self.rh / 2, text=fit(f, self.opts[self.top + r], room), anchor="w", fill=TEXT, font=f)
+            cv.create_text(k(28), self.pad + r * self.rh + self.rh / 2, text=fit(f, self.sel.labels.get(self.opts[self.top + r], self.opts[self.top + r]), room), anchor="w", fill=TEXT, font=f)
         if self.sb:
             self.sb.set(self.top / n, (self.top + self.rows) / n)
 
@@ -239,13 +239,22 @@ class Select(tk.Canvas):
         self.px = min(k(260), f.measure("0") * min(max([len(o) for o in options] + [8]), 34) + k(12 + 12 + 10 + 8))
         super().__init__(parent, width=self.px, height=k(32), bg=parent.cget("bg"), highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
         self.hover = self.opened = False
-        self._closed = 0.0
+        self._closed, self.labels = 0.0, {}
         self.var.trace_add("write", lambda *_: self.draw())
         for ev, fn in (("<Enter>", lambda e: self._set_hover(True)), ("<Leave>", lambda e: self._set_hover(False)), ("<FocusIn>", lambda e: self.draw()),
                        ("<FocusOut>", lambda e: self.draw()), ("<Button-1>", self._click), ("<Down>", lambda e: self.post()),
                        ("<Return>", lambda e: self.post()), ("<space>", lambda e: self.post()), ("<Destroy>", lambda e: self.close_popup())):
             self.bind(ev, fn)
         self.draw()
+
+    def labelled(self, labels):
+        """Show `labels[value]` instead of the stored value (field and popup); widens the field to the longest label."""
+        k, f = self.ui.k, self.ui.fonts["body"]
+        self.labels = dict(labels)
+        self.px = min(k(260), max(self.px, max(f.measure(self.labels.get(o, o)) for o in self.options) + k(12 + 12 + 10 + 8)))
+        self.config(width=self.px)
+        self.draw()
+        return self
 
     def resize(self, px):
         """Fixed width in px (e.g. so table rows align)."""
@@ -278,7 +287,7 @@ class Select(tk.Canvas):
         cw, ch = k(10), k(6)
         img.alpha_composite(render.chevron((cw, ch), SECONDARY), (w - k(12) - cw, (h - ch) // 2))
         put(self, img, 0, 0)
-        self.create_text(k(12), h / 2, text=fit(self.ui.fonts["body"], self.var.get(), w - k(12 + 12 + 10 + 8)), anchor="w", fill=TEXT, font=self.ui.fonts["body"])
+        self.create_text(k(12), h / 2, text=fit(self.ui.fonts["body"], self.labels.get(self.var.get(), self.var.get()), w - k(12 + 12 + 10 + 8)), anchor="w", fill=TEXT, font=self.ui.fonts["body"])
 
     def post(self):
         """Open the option popup under the field."""

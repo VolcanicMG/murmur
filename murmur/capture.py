@@ -38,24 +38,29 @@ def stale(state, now, session_alive, age=2.0):
 
 
 def vad_new():
-    return {"t": 0.0, "floor": [], "speech": False, "quiet_ms": 0.0}
+    return {"t": 0.0, "floor": [], "speech": False, "quiet_ms": 0.0, "speech_s": 0.0, "pauses": 0}
 
 
 def vad_step(state, rms, dt, cfg):
     """One audio block (rms, dt seconds). The first 250 ms are ignored (the start cue may leak into the mic); the floor is
     the median RMS of the next 300 ms, capped at 0.01 so speaking at once can't raise the bar; speech = rms > max(3 x floor,
     0.008). Returns (new state, decision): "finish" after cfg silence_ms (2000) of non-speech following speech, "cancel" if
-    no speech by cfg no_speech_ms (6000), else None. state["quiet_ms"] is the current run of non-speech."""
+    no speech by cfg no_speech_ms (6000), else None. state["quiet_ms"] is the current run of non-speech. For the speaking
+    metrics it also totals state["speech_s"] (seconds of speech; the 250 ms ignore window never counts and the floor window
+    counts blocks above 0.008) and state["pauses"] (speech resuming after a >= 700 ms gap)."""
     s = dict(state)
     s["t"] = state["t"] + dt
     if s["t"] <= IGNORE_S + 1e-9:
         return s, None
     if s["t"] <= IGNORE_S + FLOOR_S + 1e-9:
         s["floor"] = state["floor"] + [rms]
+        s["speech_s"] = state["speech_s"] + (dt if rms > MIN_RMS else 0.0)
         return s, None
     floor = min(statistics.median(s["floor"]), MAX_FLOOR) if s["floor"] else 0.0
     if rms > max(3 * floor, MIN_RMS):
-        s["speech"], s["quiet_ms"] = True, 0.0
+        if state["speech"] and state["quiet_ms"] >= COMMIT_PAUSE_MS:
+            s["pauses"] = state["pauses"] + 1
+        s["speech"], s["quiet_ms"], s["speech_s"] = True, 0.0, state["speech_s"] + dt
     else:
         s["quiet_ms"] = state["quiet_ms"] + dt * 1000
     if s["speech"] and s["quiet_ms"] >= cfg.get("silence_ms", 2000):
@@ -88,3 +93,15 @@ def cut_point(rms, frame_s, tail_s=2.0, win_s=0.1):
         if best is None or level <= best:
             best, cut = level, i + per_win
     return cut
+
+
+QUNS_D3D_FULL_SCREEN = 3  # SHQueryUserNotificationState: a Direct3D exclusive-fullscreen app (a game) is in front
+
+
+def should_ignore(app, cfg, quns=0):
+    """Should the hotkeys do nothing right now? True when the foreground process is in [apps] exclude, or [apps]
+    pause_fullscreen (default on) and Windows reports an exclusive-fullscreen D3D app (quns == 3)."""
+    apps = cfg.get("apps", {})
+    if app and app.lower() in [a.lower() for a in apps.get("exclude", []) if isinstance(a, str)]:
+        return True
+    return bool(apps.get("pause_fullscreen", True)) and quns == QUNS_D3D_FULL_SCREEN

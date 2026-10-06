@@ -1,0 +1,28 @@
+# Lean unit-test run: one ubuntu job, only what the Linux-runnable tests need (the rest skip). Repo is private: Actions minutes cost money.
+name: tests
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**/*.md", "docs/**", "LICENSE"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**/*.md", "docs/**", "LICENSE"]
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: pip install pillow==12.3.0 numpy==2.5.3
+      - run: python -m unittest discover tests
+      - run: python -m evals.run --cases core --no-llm --min-pass 1  # deterministic brain.py cases, no LLM
