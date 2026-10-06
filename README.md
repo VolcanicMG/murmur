@@ -10,7 +10,7 @@ python -m venv %USERPROFILE%\.murmur\venv
 Needs LM Studio installed with `google/gemma-4-e4b` downloaded; murmur starts the server and loads the model via `lms` if they are not already up.
 
 ## Download / build the exe
-`./packaging/build.sh` (from WSL) builds a single windowed `murmur.exe` onto the Desktop; see `packaging/README.md`. The speech model downloads on first run; no autostart.
+`./packaging/build.sh` (from WSL) builds a single windowed `murmur.exe` into `%LOCALAPPDATA%\Programs\murmur` (Desktop shortcut `murmur.lnk`); see `packaging/README.md`. The speech model downloads on first run; no autostart.
 
 ## Run
 `run.cmd` (tray app, runs on pythonw so no console window; any args use python.exe for stdout), `run.cmd --selftest`, `run.cmd learn` — from Windows, e.g. `\\wsl.localhost\Ubuntu-24.04\home\ethan\repos\murmur\run.cmd`. (`run.ps1` directly is blocked by the execution policy because the WSL path counts as remote; `run.cmd` bypasses it for that one file.)

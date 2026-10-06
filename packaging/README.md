@@ -7,7 +7,7 @@ From WSL in the repo root:
 ```bash
 ./packaging/build.sh
 ```
-This stages `murmur/`, `murmur.spec` and `packaging/entry.py` to `%LOCALAPPDATA%\murmur-build`, runs PyInstaller through the Windows venv Python (`C:\Users\ethan\.murmur\venv`, PyInstaller 6.22.3), and copies `dist/murmur.exe` to the Desktop. The build runs on the Windows filesystem because the `\\wsl$` share is slow and flaky for PyInstaller; WSL only orchestrates. ~20 s, ~60 MB.
+This stages `murmur/`, `murmur.spec` and `packaging/entry.py` to `%LOCALAPPDATA%\murmur-build`, runs PyInstaller through the Windows venv Python (`C:\Users\ethan\.murmur\venv`, PyInstaller 6.22.3), and copies `dist/murmur.exe` to `%LOCALAPPDATA%\Programs\murmur\murmur.exe` (a Desktop shortcut points there; the exe is kept out of OneDrive because OneDrive serves a stale icon for synced exes and would upload 60 MB per build). The build runs on the Windows filesystem because the `\\wsl$` share is slow and flaky for PyInstaller; WSL only orchestrates. ~20 s, ~60 MB.
 
 ## Embedded vs downloaded
 - Embedded: Python, onnxruntime, numpy, tkinter/Tcl, pystray/Pillow, uiautomation/comtypes, onnx-asr (its preprocessor `.onnx` data and dist-info metadata, which it reads at import).

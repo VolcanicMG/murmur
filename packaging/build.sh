@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build murmur.exe from WSL. PyInstaller must run as a Windows process (Windows venv python via interop);
 # the build is staged on the Windows filesystem because the \\wsl$ share is slow and flaky for it.
-# Override paths via env, e.g. DESKTOP=... ./packaging/build.sh
+# Override paths via env, e.g. INSTALL_DIR=... ./packaging/build.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIN_PY="${WIN_PY:-/mnt/c/Users/ethan/.murmur/venv/Scripts/python.exe}"
 BUILD_DIR="${BUILD_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build}"
-DESKTOP="${DESKTOP:-/mnt/c/Users/ethan/OneDrive/Desktop}"
+INSTALL_DIR="${INSTALL_DIR:-/mnt/c/Users/ethan/AppData/Local/Programs/murmur}"  # outside OneDrive: it caches stale icons and would sync 60 MB per build
 
 echo "[1/3] Staging source + spec to $BUILD_DIR ..."
 rm -rf "${BUILD_DIR:?}"
@@ -26,6 +26,6 @@ echo "build time: $(( $(date +%s) - start ))s"
 echo "[3/3] Delivering exe ..."
 OUT="$BUILD_DIR/dist/murmur.exe"
 [[ -f "$OUT" ]] || { echo "ERROR: build produced no exe at $OUT"; exit 1; }
-mkdir -p "$DESKTOP"
-cp "$OUT" "$DESKTOP/murmur.exe"
-echo "DONE. Size: $(du -h "$OUT" | cut -f1)  ->  $DESKTOP/murmur.exe"
+mkdir -p "$INSTALL_DIR"
+cp "$OUT" "$INSTALL_DIR/murmur.exe"
+echo "DONE. Size: $(du -h "$OUT" | cut -f1)  ->  $INSTALL_DIR/murmur.exe"
