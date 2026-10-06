@@ -58,7 +58,7 @@ method = "paste"  # or "type" for apps that block paste
 casual = "Tone: casual. Relaxed, contractions, short sentences."
 formal = "Tone: formal. Complete sentences, professional, no slang."
 neutral = "Tone: neutral. Plain, natural writing."
-code = "Tone: code context. Preserve identifiers (camelCase, snake_case, kebab-case) and CLI commands verbatim; no trailing period on a lone command; write spoken file names like 'app dot py' as `app.py`."
+code = "Tone: code context. Preserve identifiers (camelCase, snake_case, kebab-case) and CLI commands verbatim; no trailing period on a lone command; write spoken file names like 'app dot py' as `app.py`. Treat ordinary sentences as ordinary text; only keep something as a command or identifier when it clearly is one."
 
 [stt]
 model = "nemo-parakeet-tdt-0.6b-v3"
@@ -95,6 +95,7 @@ DEFAULT_PROMPT = """You clean up raw speech-to-text dictation into the text the 
 - Apply self-corrections ("X, actually Y", "no wait Y", "scratch that") and keep only the final intent.
 - Turn spoken lists into formatted lists.
 - Honour spoken punctuation such as "comma", "period", "new paragraph".
+- Remove only fillers, false starts and words the speaker corrected; keep every other content word they said, including 'okay', numbers and lists.
 - Keep the speaker's voice; do not add content or answer questions in the text.
 """
 DEFAULT_SNIPPETS = '[snippets]\nsig = "Best,\\nEthan"\n'
@@ -156,7 +157,8 @@ def append_history(entry):
 
 def read_history(n=None):
     with _locked():
-        return _read_history_unlocked(n)
+        rows = _read_history_unlocked(n)
+    return [{"mode": "dictate", **r} for r in rows]  # rows from before command-mode logging have no mode
 
 
 def _read_history_unlocked(n=None):
@@ -195,8 +197,10 @@ def delete_row(ts, final):
 
 
 def stats(rows, now=None):
-    """Dictation counts and time saved (typing 40 wpm vs speaking 150 wpm)."""
+    """Dictation counts and time saved (typing 40 wpm vs speaking 150 wpm); command rows only count in `commands`."""
     now, week = now or datetime.now(), 0
+    cmds = [r for r in rows if r.get("mode") == "command"]
+    rows = [r for r in rows if r.get("mode") != "command"]
     words = [len(r.get("final", "").split()) for r in rows]
     for r, w in zip(rows, words):
         try:
@@ -204,7 +208,7 @@ def stats(rows, now=None):
         except (KeyError, ValueError):
             pass
     total = sum(words)
-    return {"dictations": len(rows), "words": total, "minutes_saved": total / 40 - total / 150, "week_words": week}
+    return {"dictations": len(rows), "words": total, "minutes_saved": total / 40 - total / 150, "week_words": week, "commands": len(cmds)}
 
 
 def remove_term(term):

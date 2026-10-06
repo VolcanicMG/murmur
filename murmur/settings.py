@@ -6,10 +6,10 @@ from tkinter import ttk
 from types import SimpleNamespace
 import pyperclip
 from . import store, win
-from .theme import ACCENT, ERROR, FILL, NAME, ON_ACCENT, SECONDARY, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts, rounded_points
+from .theme import ACCENT, CMD_TEXT, ERROR, FILL, NAME, ON_ACCENT, SECONDARY, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts, rounded_points
 
 SECTIONS = {
-    "History": "Everything murmur has typed for you. Fix a row to teach it new spellings.",
+    "History": "Everything murmur has typed for you, dictation and commands. Fix a row to teach it new spellings.",
     "Dictionary": "Preferred spellings. Cleanup is nudged toward these words.",
     "Snippets": "Say \u201cinsert <name>\u201d to expand a snippet.",
     "Prompt": "The cleanup rules sent to the LLM with every dictation.",
@@ -366,7 +366,7 @@ class Panel(tk.Canvas):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, bd=0, height=ui.k(40))
         self.ui, self.pad = ui, ui.k(16)
         inner = tk.Frame(self, bg=FIELD)
-        _label(inner, ui, title, "section", TEXT, FIELD).pack(anchor="w", pady=(0, ui.k(6)))
+        self.title = _label(inner, ui, title, "section", TEXT, FIELD); self.title.pack(anchor="w", pady=(0, ui.k(6)))
         self.rows = tk.Frame(inner, bg=FIELD); self.rows.pack(fill="x")
         self.win = self.create_window(self.pad, self.pad, window=inner, anchor="nw")
         self.bind("<Configure>", self._resize)
@@ -519,19 +519,46 @@ def _set(box, text):
 
 
 def _row_values(r):
-    return r.get("ts", "").replace("T", " "), r.get("app", ""), r.get("tone", ""), r["final"][:100].replace("\n", " ")
+    mode = "Command" if r.get("mode") == "command" else "Dictation"
+    return r.get("ts", "").replace("T", " "), mode, r.get("app", ""), r.get("tone", ""), r["final"][:100].replace("\n", " ")
+
+
+def row_detail(r):
+    """(meta line, raw pane text, final pane text) for a history row; command rows show the instruction then the selection."""
+    cmd = r.get("mode") == "command"
+    meta = " \u00b7 ".join(x for x in (r.get("app"), r.get("title"), r.get("tone"), "Command" if cmd else "Dictation") if x)
+    raw = r.get("raw", "")
+    if cmd:
+        sel = r.get("selection", "")
+        raw += "\n\nSelection:\n" + (sel if len(sel) <= 300 else sel[:299] + "\u2026") if sel else ""
+    return meta, raw, r.get("final", "")
 
 
 def _history_page(content, ui, root, fix):
     pg, rows, k = _page(content, ui, "History", SECTIONS["History"]), [], ui.k
     strip = tk.Frame(pg.body, bg=FILL); strip.pack(fill="x", pady=(0, k(12)))
-    tiles = {n: Tile(strip, ui, n) for n in ("Dictations", "Words", "Minutes saved", "This week")}
+    tiles = {n: Tile(strip, ui, n) for n in ("Dictations", "Commands", "Words", "Minutes saved", "This week")}
     for i, t in enumerate(tiles.values()):
         t.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else k(8), 0))
-    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "app", "tone", "text"), show="headings", height=10))
-    for col, w in (("time", 150), ("app", 120), ("tone", 70), ("text", 460)):
+    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "mode", "app", "tone", "text"), show="headings", height=5))
+    tree.tag_configure("command", foreground=CMD_TEXT)  # Treeview can't colour one cell, so command rows get the accent text
+    for col, w in (("time", 140), ("mode", 80), ("app", 110), ("tone", 60), ("text", 380)):
         tree.heading(col, text=col.capitalize(), anchor="w"); tree.column(col, width=k(w), anchor="w")
     box.pack(fill="both", expand=True)
+    pane = Panel(pg.body, ui, ""); pane.pack(fill="x", pady=(k(12), 0))
+    cols = tk.Frame(pane.rows, bg=FIELD); cols.pack(fill="x"); cols.columnconfigure((0, 1), weight=1, uniform="c")
+    views = {}
+    for i, name in enumerate(("Raw", "Final")):
+        _label(cols, ui, name, "label", SECONDARY, FIELD).grid(row=0, column=i, sticky="w", padx=(0 if i == 0 else k(12), 0))
+        t = _text(cols, ui, 4, mono=False); t.config(bg=INPUT, state="disabled")
+        t.grid(row=1, column=i, sticky="ew", padx=(0 if i == 0 else k(12), 0)); views[name] = t
+
+    def show_detail(r):
+        meta, raw, final = row_detail(r) if r else ("Select a row to compare what was heard with what was typed.", "", "")
+        pane.title.config(text=meta)
+        for name, txt in (("Raw", raw), ("Final", final)):
+            views[name].config(state="normal"); _set(views[name], txt); views[name].config(state="disabled")
+    tree.bind("<<TreeviewSelect>>", lambda e: show_detail(current()))
 
     def current():
         sel = tree.selection()
@@ -541,14 +568,19 @@ def _history_page(content, ui, root, fix):
         rows[:] = store.read_history(300)[::-1]
         tree.delete(*tree.get_children())
         for i, r in enumerate(rows):
-            tree.insert("", "end", iid=str(i), values=_row_values(r))
+            tree.insert("", "end", iid=str(i), values=_row_values(r), tags=("command",) if r.get("mode") == "command" else ())
+        show_detail(None)
         s = store.stats(store.read_history())
-        for name, v in zip(tiles, (s["dictations"], s["words"], f"~{s['minutes_saved']:.0f} min", s["week_words"])):
+        for name, v in zip(tiles, (s["dictations"], s["commands"], s["words"], f"~{s['minutes_saved']:.0f} min", s["week_words"])):
             tiles[name].set(v)
 
     def copy():
         if r := current():
             pyperclip.copy(r["final"])
+
+    def copy_raw():
+        if r := current():
+            pyperclip.copy(r.get("raw", ""))
 
     def fix_row():
         if (r := current()) and fix:
@@ -557,7 +589,7 @@ def _history_page(content, ui, root, fix):
     def delete():
         if r := current():
             store.delete_row(r["ts"], r["final"]); load()
-    _pills(pg, ui, ("Copy", copy, "primary"), ("Fix\u2026", fix_row, "secondary"), ("Delete row", delete, "danger"), ("Refresh", load, "secondary"))
+    _pills(pg, ui, ("Copy", copy, "primary"), ("Copy raw", copy_raw, "secondary"), ("Fix\u2026", fix_row, "secondary"), ("Delete row", delete, "danger"), ("Refresh", load, "secondary"))
     return pg, load
 
 

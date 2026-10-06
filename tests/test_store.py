@@ -19,6 +19,16 @@ class T(unittest.TestCase):
         self.assertAlmostEqual(s["minutes_saved"], 7 / 40 - 7 / 150)
         self.assertEqual(store.stats([])["words"], 0)
 
+    def test_stats_modes_and_default_mode(self):
+        rows = [{"ts": "2026-10-09T10:00:00", "final": "one two"}, {"ts": "2026-10-09T10:01:00", "mode": "command", "raw": "make it formal",
+                "selection": "yo", "final": "Hello there my friend"}]
+        s = store.stats(rows, datetime(2026, 10, 10))
+        self.assertEqual((s["dictations"], s["words"], s["week_words"], s["commands"]), (1, 2, 2, 1))
+        for r in rows:
+            store.append_history(r)
+        self.assertEqual([h["mode"] for h in store.read_history()], ["dictate", "command"])
+        self.assertEqual(store.read_history()[1]["selection"], "yo")
+
     def test_snippets_round_trip(self):
         sn = {"sig": 'Best,\n"Ethan"\\o/', "emoji": "hi \U0001F600 \u2014 tab\t", "multi word": "x"}
         store.save_snippets(sn)

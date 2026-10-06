@@ -35,7 +35,7 @@ If you dictate a near-identical sentence (same app, within 90 s) that differs by
 `learn` summarizes recent history into `style.md`, which is fed into the cleanup prompt.
 
 ## Customising
-Tray menu > Settings… (or `.\run.ps1 --settings`) edits all of this in a window: history (copy/fix/delete, time-saved stats), dictionary, snippets, prompt, tones and config (a form of toggles, dropdowns, hotkey recorders and an app-to-tone table; the raw `config.toml` sits under Advanced and keeps comments, a form save drops them). Config/tone saves apply live except hotkeys (restart).
+Tray menu > Settings… (or `.\run.ps1 --settings`) edits all of this in a window: history (Dictation/Command mode per row, a Raw vs Final pane to compare what was heard with what was typed, copy/fix/delete, time-saved stats for dictation), dictionary, snippets, prompt, tones and config (a form of toggles, dropdowns, hotkey recorders and an app-to-tone table; the raw `config.toml` sits under Advanced and keeps comments, a form save drops them). Config/tone saves apply live except hotkeys (restart).
 
 Everything lives in `~/.murmur/`: `config.toml` (hotkeys, LLM provider, `[tones]`, `[apps]`, `[output]`, `[audio] device` (input device name, `""` = system default; pick it from the Config form, which also has a Test mic button; a missing device falls back to the default with one log line), `[context]` for cursor-aware dictation; skipped for `no_copy` apps, and a warning is logged if the LLM provider is remote since field text would leave the machine), `prompt.md` (cleanup rules), `dictionary.txt`, `snippets.toml`, `style.md`.
 

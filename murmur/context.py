@@ -26,7 +26,7 @@ def read_field(cfg, on_rect=None, text=True):
         import uiautomation as auto
         with auto.UIAutomationInitializerInThread():
             ctl = auto.GetFocusedControl()
-            _emit_rect(ctl, on_rect)
+            _emit_rect(auto, ctl, on_rect)
             if not (text and c.get("enabled", True)):
                 del ctl
                 return {}
@@ -39,15 +39,33 @@ def read_field(cfg, on_rect=None, text=True):
         return {}
 
 
-def _emit_rect(ctl, on_rect):
+def _emit_rect(auto, ctl, on_rect):
+    """Report where the card should sit: the control's left/right, and (when the control has a TextPattern) the
+    caret line's top/bottom, since a terminal or editor pane is far taller than the line being typed. Geometry only."""
     if not on_rect:
         return
     try:
         r = ctl.BoundingRectangle
-        if r.right > r.left and r.bottom > r.top:
-            on_rect((r.left, r.top, r.right, r.bottom))
+        if not (r.right > r.left and r.bottom > r.top):
+            return
+        line = _caret_line(auto, ctl)
+        on_rect((r.left, line[0], r.right, line[1]) if line else (r.left, r.top, r.right, r.bottom))
     except Exception as e:
         log.debug("bounding rect failed: %s", e)
+
+
+def _caret_line(auto, ctl):
+    """(top, bottom) of the line containing the caret, or None."""
+    tp = ctl.GetPattern(auto.PatternId.TextPattern)
+    sels = tp.GetSelection() if tp else None
+    if not sels:
+        return None
+    rng = sels[0].Clone()
+    rects = rng.GetBoundingRectangles()  # a collapsed caret may still report its own rect
+    rng.ExpandToEnclosingUnit(auto.TextUnit.Line, waitTime=0)
+    rects = rng.GetBoundingRectangles() or rects
+    rects = [x for x in rects if x.bottom > x.top]
+    return (rects[0].top, rects[0].bottom) if rects else None
 
 
 def _from_text_pattern(auto, ctl):

@@ -26,10 +26,11 @@ class Session:
         self.retry = hooks.retry
         self.pasted, self.last_paste = hooks.pasted, hooks.last_paste  # (time, app) of the last paste lives in app state across sessions
         self.stream, self.buf = None, []
-        self.raw, self.cleaned, self.inflight = "", ("", "", False), (None, None)  # cleaned = (raw, text, had_ctx); inflight = (raw, Event)
+        self.raw, self.cleaned, self.inflight = "", ("", "", False, True), (None, None)  # cleaned = (raw, text, had_ctx, plausible); inflight = (raw, Event)
         self.app = self.title = ""
         self.ctx = {}
-        self.cancelled = self.failed = self.degraded = self.paste_now = False
+        self.cancelled = self.failed = self.degraded = self.paste_now = self.kept_raw = False
+        self.selection = ""
 
     def cancel(self):
         """Esc on the card: discard everything (no paste, no history), at any point."""
@@ -167,7 +168,8 @@ class Session:
     def _live(self, r, ev):
         try:
             had_ctx = "before" in self.ctx  # a context-less result must not be reused once context arrives
-            self.cleaned = (r, brain.clean(r, self.ctx), had_ctx)
+            text, ok = brain.clean_checked(r, self.ctx, retry=False)  # a rejected live result is never shown, only kept as the raw fallback
+            self.cleaned = (r, text, had_ctx, ok)
         except Exception as e:
             log.info("live clean failed: %s", e)
         finally:
@@ -183,6 +185,7 @@ class Session:
         if self.paste_now or self.cancelled:
             return raw
         if self.cleaned[0] == raw and self.cleaned[2] == ("before" in self.ctx):
+            self.kept_raw = not self.cleaned[3]
             return self.cleaned[1]
         box, done = [], threading.Event()
         threading.Thread(target=self._clean_into, args=(raw, box, done), daemon=True).start()
@@ -192,11 +195,12 @@ class Session:
         if box[0] is None:
             self.degraded = True
             return raw
-        return box[0]
+        self.kept_raw = not box[0][1]
+        return box[0][0]
 
     def _clean_into(self, raw, box, done):
         try:
-            box.append(brain.clean(raw, self.ctx))
+            box.append(brain.clean_checked(raw, self.ctx))
         except Exception as e:
             log.info("clean failed, pasting raw: %s", e)
             box.append(None)
@@ -214,6 +218,7 @@ class Session:
         if not sel and self.app not in store.no_copy(self.cfg):
             # ponytail: VS Code's empty-selection ctrl+c copies the whole line
             sel = win.copy_selection()
+        self.selection = sel or ""
         try:
             return brain.rewrite(sel, self.raw, self.ctx)
         except Exception as e:
@@ -240,7 +245,9 @@ class Session:
             return
         self.pasted(self.app)
         entry = {"ts": datetime.now().isoformat(timespec="seconds"), "app": self.app, "title": self.title,
-                 "tone": self.ctx["tone"], "raw": self.raw, "final": final}
+                 "tone": self.ctx["tone"], "mode": self.mode, "raw": self.raw, "final": final}
+        if self.mode == "command":
+            entry["selection"] = self.selection
         store.append_history(entry)
         self._learn_from_redictation(prev, final)
         self._post(lambda: self._show_outcome(final))
@@ -248,6 +255,8 @@ class Session:
     def _show_outcome(self, final):
         if self.degraded:
             self.ov.state("offline")
+        elif self.kept_raw:
+            self.ov.state("offline", "Kept your words; cleanup looked wrong.", label="Kept raw")
         elif self.mode == "command":
             n = final.count("\n") + 1
             self.ov.state("done", f"Rewrote {n} line{'s' if n != 1 else ''}")
@@ -256,6 +265,8 @@ class Session:
 
     def _learn_from_redictation(self, prev, final):
         """A near-identical dictation soon after the last one is a correction: learn the changed terms."""
+        if self.mode != "dictate" or (prev or {}).get("mode", "dictate") != "dictate":
+            return  # command rows are not dictations to compare or learn from
         try:
             fresh = prev and prev["app"] == self.app and not prev.get("corrected")
             age = (datetime.now() - datetime.fromisoformat(prev["ts"])).total_seconds() if fresh else None

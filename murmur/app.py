@@ -126,6 +126,13 @@ def learn_word(cfg, ov):
     threading.Thread(target=_learn_word, args=(cfg, ov), daemon=True).start()  # off the hook thread
 
 
+def _set_icon(icon, state, key):
+    """Tray icon + tooltip for a state (paused wins over idle). A fresh copy is assigned so the shell always updates."""
+    state = "paused" if S["paused"] and state == "idle" else state
+    icon.icon = tray_image(state).copy()
+    icon.title = TOOLTIPS[state].format(key=key)
+
+
 def quit_app(icon, ov):
     """Stop any running session without pasting, hide the card, then exit."""
     if S["session"]:
@@ -144,9 +151,7 @@ def tray_app(cfg, learn, boot):
     learn_key = hk.get("learn_word", "ctrl+alt+d")
 
     def mark(state):
-        state = "paused" if S["paused"] and state == "idle" else state
-        icon.icon = tray_image(state)
-        icon.title = TOOLTIPS[state].format(key=keys["dictate"])
+        _set_icon(icon, state, keys["dictate"])
 
     for mode, key in keys.items():
         keyboard.on_press_key(key, lambda e, m=mode, k=key: store.key_matches(e.name, k) and press(m, cfg, ov, mark))

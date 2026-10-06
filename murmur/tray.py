@@ -1,10 +1,11 @@
 """Tray icon image and tooltip per state (PIL). Same design language as the caption card."""
-import sys
+import logging, sys
 from pathlib import Path
 from functools import lru_cache
 from PIL import Image, ImageDraw
 from .theme import ERROR, SECONDARY, TEXT
 
+log = logging.getLogger("murmur")
 BUBBLE = (0xA1, 0xA6, 0xF2)  # periwinkle of packaging/icon.png
 COLORS = {"idle": "#A1A6F2", "recording": ERROR, "polishing": "#FFB454", "paused": SECONDARY, "error": ERROR}
 TOOLTIPS = {"idle": "murmur \u00b7 ready \u2014 hold {key} to dictate", "recording": "murmur \u00b7 listening",
@@ -20,8 +21,11 @@ def _base():
     """256 px RGBA bubble in the original periwinkle: packaging/icon.png (source or frozen), else drawn procedurally."""
     p = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "packaging" / "icon.png"
     try:
-        return Image.open(p).convert("RGBA").resize((256, 256), Image.LANCZOS)
+        im = Image.open(p).convert("RGBA").resize((256, 256), Image.LANCZOS)
+        log.debug("tray icon base: %s", p)
+        return im
     except OSError:
+        log.warning("tray icon.png not found at %s; drawing the fallback bubble", p)
         im = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
         d.rounded_rectangle((3, 22, 253, 200), radius=60, fill=BUBBLE + (255,))

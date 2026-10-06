@@ -49,6 +49,18 @@ class T(unittest.TestCase):
         for name, st in card.STATES.items():
             self.assertEqual(len(st), 9, name)
 
+    @unittest.skipUnless(__import__("importlib").util.find_spec("pystray"), "pystray not installed")
+    def test_pystray_icon_takes_every_state(self):
+        import pystray
+        from murmur import tray
+        icon = pystray.Icon("t", tray.tray_image("idle"))  # built, not run
+        for state in tray.COLORS:
+            img = tray.tray_image(state).copy()
+            icon.icon = img
+            self.assertIs(icon.icon, img)
+            self.assertEqual(icon.icon.size, (64, 64))
+        self.assertNotEqual(tray.tray_image("recording").getpixel((10, 32)), tray.tray_image("idle").getpixel((10, 32)))
+
     @unittest.skipUnless(__import__("importlib").util.find_spec("PIL"), "PIL not installed")
     def test_tray_images(self):
         from murmur import tray
