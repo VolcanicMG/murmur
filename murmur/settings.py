@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pyperclip
 from . import cues, render, store, win
 from .theme import ACCENT, CMD_TEXT, ERROR, FIELD, FILL, HAIR, INPUT, NAME, ON_ACCENT, SECONDARY, SEL, SIDEBAR, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts
-from .widgets import Chip, Pill, Select, Tag, TextField, Tile, Toggle, photo, pill, put
+from .inputs import Select, TextField, frame_text
+from .widgets import Scrollbar, wheel_scroll, Chip, Pill, Tag, Tile, Toggle, photo, pill, put
 
 SECTIONS = {
     "History": "Everything murmur has typed for you, dictation and commands. Fix a row to teach it new spellings.",
@@ -125,7 +126,7 @@ class HotkeyField(tk.Frame):
         super().__init__(parent, bg=parent.cget("bg"))
         self.status, self.q, self.busy = status, queue.Queue(), False
         self.entry = TextField(self, ui, 22)
-        self.entry.pack(side="left", ipady=ui.k(5)); Pill(self, ui, "Record", self.record).pack(side="left", padx=(ui.k(8), 0))
+        self.entry.pack(side="left"); Pill(self, ui, "Record", self.record).pack(side="left", padx=(ui.k(8), 0))
 
     def get(self):
         return self.entry.get()
@@ -199,8 +200,8 @@ class AppsTable(tk.Frame):
         self.ui, self.tones, self.vars = ui, [], {}
         self.list = tk.Frame(self, bg=FIELD); self.list.pack(fill="x")
         add = tk.Frame(self, bg=FIELD); add.pack(fill="x", pady=(ui.k(10), 0))
-        self.name = TextField(add, ui, 18); self.name.pack(side="left", ipady=ui.k(5))
-        self.pick = Select(add, ui, ["casual"]); self.pick.pack(side="left", padx=ui.k(8))
+        self.name = TextField(add, ui, 18); self.name.pack(side="left")
+        self.pick = Select(add, ui, ["casual"]); self.pick.resize(ui.k(170)); self.pick.pack(side="left", padx=ui.k(8))
         Pill(add, ui, "Add row", self.add).pack(side="left")
 
     def get(self):
@@ -227,7 +228,7 @@ class AppsTable(tk.Frame):
             row = tk.Frame(self.list, bg=FIELD); row.pack(fill="x", pady=k(2))
             _label(row, self.ui, exe, "body", NAME, FIELD).pack(side="left"); row.winfo_children()[0].config(width=22)
             sel = Select(row, self.ui, self.tones + ([var.get()] if var.get() not in self.tones else []), var=var)
-            sel.pack(side="left", padx=k(8))
+            sel.resize(k(170)); sel.pack(side="left", padx=k(8))
             Tag(row, self.ui, "Remove", lambda e=exe: self.remove(e)).pack(side="left")
 
 
@@ -239,7 +240,7 @@ class ChipList(tk.Frame):
         self.ui, self.items, self.lower = ui, [], lower
         self.flow = tk.Frame(self, bg=FIELD); self.flow.pack(fill="x")
         add = tk.Frame(self, bg=FIELD); add.pack(fill="x", pady=(ui.k(10), 0))
-        self.name = TextField(add, ui, 18); self.name.pack(side="left", ipady=ui.k(5))
+        self.name = TextField(add, ui, 18); self.name.pack(side="left")
         Pill(add, ui, "Add", self.add).pack(side="left", padx=(ui.k(8), 0))
         self.flow.bind("<Configure>", lambda e: self.render())
 
@@ -279,33 +280,32 @@ def _style(top, ui):
     st.configure("Treeview.Heading", background=on_fill(0.06), foreground=SECONDARY, relief="flat", borderwidth=0, font=ui.fonts["small"], padding=(k(8), k(6)))
     st.map("Treeview", background=[("selected", SEL)], foreground=[("selected", TEXT)])
     st.map("Treeview.Heading", background=[("active", on_fill(0.08))])
-    st.layout("Dark.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
-        ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
-    st.configure("Dark.Vertical.TScrollbar", troughcolor=FILL, background=on_fill(0.12), bordercolor=FILL, lightcolor=on_fill(0.12), darkcolor=on_fill(0.12), width=k(10))
-    st.map("Dark.Vertical.TScrollbar", background=[("active", on_fill(0.22))])
 
 
 def _entry(parent, ui, bg=FIELD):
-    return tk.Entry(parent, relief="flat", bd=0, bg=bg, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
-                    highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, font=ui.fonts["body"])
+    return TextField(parent, ui, 20)
 
 
 def _text(parent, ui, height=12, mono=True):
-    return tk.Text(parent, relief="flat", bd=0, bg=FIELD, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
-                   highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, height=height, wrap="word", undo=True,
-                   padx=ui.k(10), pady=ui.k(8), font=ui.fonts["mono" if mono else "body"])
+    """Multi-line editor in a rounded panel (returns the Text; pack/grid act on the panel)."""
+    def make(f):
+        return tk.Text(f, relief="flat", bd=0, bg=INPUT, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
+                       highlightthickness=0, height=height, wrap="word", undo=True, padx=0, pady=0, font=ui.fonts["mono" if mono else "body"])
+    return frame_text(parent, ui, make)
 
 
 def _listbox(parent, ui, height=12):
-    return tk.Listbox(parent, relief="flat", bd=0, bg=FIELD, fg=TEXT, selectbackground=SEL, selectforeground=TEXT, activestyle="none",
-                      highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, height=height, font=ui.fonts["body"], exportselection=False)
+    def make(f):
+        return tk.Listbox(f, relief="flat", bd=0, bg=INPUT, fg=TEXT, selectbackground=SEL, selectforeground=TEXT, activestyle="none",
+                          highlightthickness=0, height=height, font=ui.fonts["body"], exportselection=False)
+    return frame_text(parent, ui, make)
 
 
-def _scrolled(parent, make):
-    """(frame, widget): widget with a dark vertical scrollbar."""
-    box = tk.Frame(parent, bg=FILL)
+def _scrolled(parent, make, bg=FILL):
+    """(frame, widget): widget with a slim vertical scrollbar; bg = the surface it sits on."""
+    box = tk.Frame(parent, bg=bg)
     w = make(box)
-    sb = ttk.Scrollbar(box, style="Dark.Vertical.TScrollbar", orient="vertical", command=w.yview)
+    sb = Scrollbar(box, lambda *a: w.yview(*a))
     w.configure(yscrollcommand=sb.set)
     sb.pack(side="right", fill="y", padx=(4, 0)); w.pack(side="left", fill="both", expand=True)
     return box, w
@@ -355,18 +355,18 @@ def _history_page(content, ui, root, fix):
     tiles = {n: Tile(strip, ui, n) for n in ("Dictations", "Commands", "Words", "Minutes saved", "This week")}
     for i, t in enumerate(tiles.values()):
         t.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else k(8), 0))
-    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "mode", "app", "tone", "text"), show="headings", height=5))
+    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "mode", "app", "tone", "text"), show="headings", height=3))
     tree.tag_configure("command", foreground=CMD_TEXT)  # Treeview can't colour one cell, so command rows get the accent text
     for col, w in (("time", 140), ("mode", 80), ("app", 110), ("tone", 60), ("text", 380)):
         tree.heading(col, text=col.capitalize(), anchor="w"); tree.column(col, width=k(w), anchor="w")
+    pane = Panel(pg.body, ui, ""); pane.pack(side="bottom", fill="x", pady=(k(12), 0))  # packed before the table: it keeps its height, the table shrinks first
     box.pack(fill="both", expand=True)
-    pane = Panel(pg.body, ui, ""); pane.pack(fill="x", pady=(k(12), 0))
     cols = tk.Frame(pane.rows, bg=FIELD); cols.pack(fill="x"); cols.columnconfigure((0, 1), weight=1, uniform="c")
     views = {}
     for i, name in enumerate(("Raw", "Final")):
         _label(cols, ui, name, "label", SECONDARY, FIELD).grid(row=0, column=i, sticky="w", padx=(0 if i == 0 else k(12), 0))
-        t = _text(cols, ui, 4, mono=False); t.config(bg=INPUT, state="disabled")
-        t.grid(row=1, column=i, sticky="ew", padx=(0 if i == 0 else k(12), 0)); views[name] = t
+        sbox, t = _scrolled(cols, lambda p: _text(p, ui, 4, mono=False), FIELD); t.config(state="disabled")
+        sbox.grid(row=1, column=i, sticky="ew", padx=(0 if i == 0 else k(12), 0)); views[name] = t
 
     def show_detail(r):
         meta, raw, final = row_detail(r) if r else ("Select a row to compare what was heard with what was typed.", "", "")
@@ -412,7 +412,7 @@ def _dictionary_page(content, ui):
     pg = _page(content, ui, "Dictionary", SECTIONS["Dictionary"])
     box, lb = _scrolled(pg.body, lambda p: _listbox(p, ui))
     box.pack(fill="both", expand=True)
-    entry = _entry(pg.body, ui); entry.pack(fill="x", pady=(ui.k(12), 0), ipady=ui.k(6))
+    entry = _entry(pg.body, ui); entry.pack(fill="x", pady=(ui.k(12), 0))
 
     def load():
         lb.delete(0, "end")
@@ -437,7 +437,7 @@ def _snippets_page(content, ui):
     box, lb = _scrolled(pg.body, lambda p: _listbox(p, ui, 5))
     box.pack(fill="x")
     _label(pg.body, ui, "Name").pack(anchor="w", pady=(ui.k(12), ui.k(4)))
-    name = _entry(pg.body, ui); name.pack(fill="x", ipady=ui.k(6))
+    name = _entry(pg.body, ui); name.pack(fill="x")
     _label(pg.body, ui, "Text").pack(anchor="w", pady=(ui.k(12), ui.k(4)))
     body = _text(pg.body, ui, 6); body.pack(fill="both", expand=True)
 
@@ -527,15 +527,15 @@ def _tones_page(content, ui, cfg, status, after_save):
 def _scroll_frame(parent):
     """Frame inside a vertically scrolling canvas (dark scrollbar, mouse wheel)."""
     sc = tk.Canvas(parent, bg=FILL, highlightthickness=0, bd=0)
-    sb = ttk.Scrollbar(parent, style="Dark.Vertical.TScrollbar", orient="vertical", command=sc.yview)
+    sb = Scrollbar(parent, lambda *a: sc.yview(*a))
     sc.configure(yscrollcommand=sb.set)
     sb.pack(side="right", fill="y", padx=(4, 0)); sc.pack(side="left", fill="both", expand=True)
     inner = tk.Frame(sc, bg=FILL)
     win_id = sc.create_window(0, 0, window=inner, anchor="nw")
     inner.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all")))
     sc.bind("<Configure>", lambda e: sc.itemconfig(win_id, width=e.width))
-    wheel = lambda e: None if isinstance(e.widget, tk.Text) else sc.yview_scroll(-1 if e.delta > 0 else 1, "units")
-    sc.bind("<Enter>", lambda e: sc.bind_all("<MouseWheel>", wheel)); sc.bind("<Leave>", lambda e: sc.unbind_all("<MouseWheel>"))
+    sc.wheel = lambda e: sc.yview_scroll(-1 if e.delta > 0 else 1, "units")  # found by widgets.wheel_scroll from any child under the pointer
+    wheel_scroll(sc)
     return inner
 
 
@@ -611,13 +611,12 @@ def _row(B, g, path, label, widget):
 
 def _text_row(B, g, path, label):
     lab, w = _row(B, g, path, label, TextField(g, B.ui, 30))
-    w.grid_configure(ipady=B.k(5), sticky="ew")
+    w.grid_configure(sticky="ew")
     return lab, w
 
 
 def _number_row(B, g, path, label):
     lab, w = _row(B, g, path, label, TextField(g, B.ui, 8, digits=True))
-    w.grid_configure(ipady=B.k(5))
     return lab, w
 
 
@@ -643,11 +642,13 @@ def _dictation_card(B):
     _toggle_row(B, g, "dictation.toggle", "Tap to toggle (hands-free)")
     _number_row(B, g, "dictation.silence_ms", "Stop after silence (ms)")
     _toggle_row(B, g, "ui.sounds", "Sounds")
+    lab, _ = _toggle_row(B, g, "ui.start_sound", "Start sound")
+    lab.config(padx=k(14)); _label(g, ui, "Plays when recording begins", "small", SECONDARY, FIELD).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(k(60), 0))
     vol = Select(g, ui, ["0.1", "0.25", "0.5"])
     _row(B, g, "ui.sound_volume", "Sound volume", vol)
 
     def play_test():
-        cues.play("start", {"ui": {"sounds": True, "sound_volume": float(vol.get() or 0.25)}})
+        cues.play("start", {"ui": {"sounds": True, "start_sound": True, "sound_volume": float(vol.get() or 0.25)}})
     Pill(g, ui, "Test", play_test).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(vol.px + k(8), 0))  # same cell as the Select: no third column to widen the card
 
 

@@ -1,4 +1,4 @@
-"""Soft audio cues. tone_wav is pure; play is a no-op off Windows or when [ui] sounds is false."""
+"""Soft audio cues. tone_wav is pure; play is a no-op off Windows, when [ui] sounds is false, or for "start" when [ui] start_sound is false."""
 import io, logging, os, threading, wave
 import numpy as np
 from . import store
@@ -7,6 +7,7 @@ log = logging.getLogger("murmur")
 
 RATE = 22050
 CUES = {"start": ([660, 880], 70), "stop": ([880, 660], 70), "done": ([990], 60), "error": ([220], 140), "cancel": ([440], 60)}  # name -> (freqs Hz, ms per note)
+GAIN = {"start": 0.35, "stop": 0.6, "cancel": 0.6, "done": 0.8, "error": 1.0}  # relative to [ui] sound_volume; start plays as you begin speaking
 _cache = {}
 
 
@@ -25,11 +26,12 @@ def tone_wav(freqs, ms, volume):
 
 def cue_path(name, vol):
     """WAV file for a cue, written once (winsound can't play from memory asynchronously)."""
-    p = store.HOME / "cues" / f"{name}-{vol}.wav"
+    level = round(vol * GAIN.get(name, 1.0), 3)  # in the filename so a gain change never reuses a stale file
+    p = store.HOME / "cues" / f"{name}-{level}.wav"
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")  # two threads may race on the first play
-        tmp.write_bytes(tone_wav(*CUES[name], vol))
+        tmp.write_bytes(tone_wav(*CUES[name], level))
         os.replace(tmp, p)
     return p
 
@@ -37,7 +39,7 @@ def cue_path(name, vol):
 def play(name, cfg):
     """Play cue `name` asynchronously at [ui] sound_volume; never raises (failures are logged)."""
     ui = cfg.get("ui", {})
-    if not ui.get("sounds", True):
+    if not ui.get("sounds", True) or (name == "start" and not ui.get("start_sound", True)):
         return
     try:
         import winsound

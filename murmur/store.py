@@ -51,6 +51,7 @@ timeout = 15
 [ui]
 startup_toast = true  # one-shot "murmur is running" notification
 sounds = true  # soft start/stop/done/error cues
+start_sound = true  # the cue when recording begins; turn off to keep only stop/done/error
 sound_volume = 0.25  # 0-1
 
 [context]

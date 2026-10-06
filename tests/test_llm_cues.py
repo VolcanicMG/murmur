@@ -113,7 +113,7 @@ class Cues(unittest.TestCase):
         store.HOME = Path(tempfile.mkdtemp())
         p = cues.cue_path("start", 0.25)
         self.assertTrue(p.exists())
-        self.assertEqual([x.name for x in p.parent.iterdir()], ["start-0.25.wav"])  # no .tmp left behind
+        self.assertEqual([x.name for x in p.parent.iterdir()], ["start-0.087.wav"])  # no .tmp left behind
 
     def test_play_failure_is_logged_not_swallowed(self):
         ws = mock.MagicMock(); ws.PlaySound.side_effect = RuntimeError("boom")
@@ -123,6 +123,7 @@ class Cues(unittest.TestCase):
     def test_play_noop_when_disabled(self):
         with mock.patch.dict(sys.modules, {"winsound": mock.MagicMock()}) as m:
             cues.play("start", {"ui": {"sounds": False}})
+            cues.play("start", {"ui": {"sounds": True, "start_sound": False}})  # start muted on its own
             sys.modules["winsound"].PlaySound.assert_not_called()
             cues.play("start", {"ui": {"sounds": True}})
             sys.modules["winsound"].PlaySound.assert_called_once()

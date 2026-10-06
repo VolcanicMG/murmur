@@ -153,57 +153,6 @@ class Toggle(tk.Canvas):
         put(self, render.toggle(round(self.pos, 2), (self.k(44), self.k(24)), (on_fill(0.14), ACCENT, NAME, ON_ACCENT)), 0, 0)
 
 
-class TextField(tk.Entry):
-    """Flat entry with get()/set(); `digits` restricts input to whole numbers."""
-
-    def __init__(self, parent, ui, width=20, digits=False):
-        super().__init__(parent, relief="flat", bd=0, bg=INPUT, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
-                         highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, font=ui.fonts["body"], width=width)
-        if digits:
-            self.config(validate="key", validatecommand=(self.register(lambda v: v == "" or v.isdigit()), "%P"))
-
-    def set(self, v):
-        self.delete(0, "end"); self.insert(0, str(v))
-
-
-class Select(tk.OptionMenu):
-    """Flat dropdown with an anti-aliased chevron; reset(options) swaps the choices. Width is fixed in px (capped at 260 px x scale, so a Test pill beside it still fits the card)."""
-
-    def __init__(self, parent, ui, options, var=None):
-        self.var, self.ui = var or tk.StringVar(value=options[0] if options else ""), ui
-        super().__init__(parent, self.var, *options)
-        k, f = ui.k, ui.fonts["body"]
-        self.px = min(k(260), f.measure("0") * min(max([len(o) for o in options] + [8]), 34) + k(20) + k(10 + 14))
-        self.config(bg=INPUT, fg=TEXT, activebackground=on_fill(0.14), activeforeground=TEXT, highlightthickness=1, highlightbackground=HAIR,
-                    relief="flat", bd=0, font=f, anchor="w", padx=k(10), pady=k(3), cursor="hand2", indicatoron=0, compound="right", width=self.px)
-        self["menu"].config(bg=on_fill(0.06), fg=TEXT, activebackground=SEL, activeforeground=TEXT, bd=0, borderwidth=0, activeborderwidth=0, relief="flat", font=f)
-        self.var.trace_add("write", lambda *_: self._chev())
-        self._chev()
-
-    def _chev(self):
-        """Chevron image as wide as the free space right of the text, glyph at its far end (so it sits at the button's right edge)."""
-        k = self.ui.k
-        cw, ch = k(10), k(6)
-        free = self.px - 2 * k(10) - self.ui.fonts["body"].measure(self.var.get()) - 2 * k(1)
-        w = max(cw + k(6), free)
-        from PIL import Image
-        img = Image.new("RGBA", (w, ch), (0, 0, 0, 0)); img.alpha_composite(render.chevron((cw, ch), SECONDARY), (w - cw, 0))
-        self._chev_img = photo(img, INPUT)
-        self.config(image=self._chev_img)
-
-    def reset(self, options):
-        menu = self["menu"]
-        menu.delete(0, "end")
-        for o in options:
-            menu.add_command(label=o, command=tk._setit(self.var, o))
-
-    def get(self):
-        return self.var.get()
-
-    def set(self, v):
-        self.var.set(v)
-
-
 class Tag(_Round):
     """Small rounded label button (removable chip / Remove)."""
 
@@ -221,3 +170,95 @@ class Tag(_Round):
     def paint(self):
         self.shape(13, on_fill(0.14 if self.hover else 0.09))
         self.create_text(self.winfo_width() / 2, self.winfo_height() / 2, text=self.text, fill=TEXT if self.hover else NAME, font=self.ui.fonts["small"])
+
+
+class Scrollbar(tk.Canvas):
+    """Slim vertical scrollbar, drop-in for ttk.Scrollbar: set(first, last) from the widget's yscrollcommand; `command` gets
+    ("moveto", frac) while dragging and ("scroll", +-1, "pages") on track clicks. Draws nothing when everything is visible."""
+
+    def __init__(self, parent, command=None):
+        self.s = parent.winfo_fpixels("1i") / 96  # same DPI scale as the rest of the window
+        super().__init__(parent, width=round(10 * self.s), bg=parent.cget("bg"), highlightthickness=0, bd=0)
+        self.cmd, self.first, self.last, self.hover, self.grab = command, 0.0, 1.0, False, None
+        for ev, fn in (("<Configure>", lambda e: self.draw()), ("<Enter>", lambda e: self._hover(True)), ("<Leave>", lambda e: self._hover(False)),
+                       ("<Button-1>", self._press), ("<B1-Motion>", self._drag), ("<ButtonRelease-1>", self._release)):
+            self.bind(ev, fn)
+
+    def set(self, first, last):
+        self.first, self.last = float(first), float(last)
+        self._toggle_pack()
+        self.draw()
+
+    def _toggle_pack(self):
+        """When nothing scrolls, give the column back (pack-managed only) so panels beside it line up with full-width fields."""
+        hide = self.first <= 0 and self.last >= 1
+        if hide and self.winfo_manager() == "pack":
+            self._pack_info = self.pack_info()
+            self.pack_forget()
+        elif not hide and not self.winfo_manager() and getattr(self, "_pack_info", None):
+            info = dict(self._pack_info); info.pop("in", None)
+            self.pack(**info)
+
+    def _hover(self, on):
+        self.hover = on
+        self.draw()
+
+    def _thumb(self):
+        """(top, bottom) px of the thumb, at least 28 px x scale tall, or None when nothing scrolls."""
+        h = self.winfo_height()
+        if self.first <= 0 and self.last >= 1 or h < 2:
+            return None
+        top, bot = self.first * h, self.last * h
+        grow = max(0, round(28 * self.s) - (bot - top))
+        top = max(0, min(top - grow * self.first, h - (bot - top) - grow))
+        return top, top + (bot - top) + grow
+
+    def draw(self):
+        self.delete("all")
+        self._imgs = []
+        t = self._thumb()
+        if not t:
+            return
+        bg = self.cget("bg")
+        col = blend(ACCENT, bg, 0.6) if self.grab is not None else blend(WHITE, bg, 0.24 if self.hover else 0.14)
+        tw, th = round(6 * self.s), max(2, round(t[1] - t[0]))
+        put(self, render.pill((tw, th), col), (self.winfo_width() - tw) // 2, round(t[0]))
+
+    def _press(self, e):
+        t = self._thumb()
+        if not t:
+            return
+        if t[0] <= e.y <= t[1]:
+            self.grab = e.y - t[0]
+            self.draw()
+        elif self.cmd:
+            self.cmd("scroll", -1 if e.y < t[0] else 1, "pages")
+
+    def _drag(self, e):
+        t = self._thumb()
+        if self.grab is None or not t or not self.cmd:
+            return
+        h = self.winfo_height()
+        self.cmd("moveto", max(0.0, min((e.y - self.grab) / h, 1 - (self.last - self.first))))
+
+    def _release(self, e):
+        self.grab = None
+        self.draw()
+
+
+def wheel_scroll(root):
+    """One global <MouseWheel> dispatcher: scrolls the nearest ancestor of the widget under the pointer that has a `wheel`
+    callable (set on scroll canvases); Text/Treeview/Listbox scroll themselves. Idempotent per root."""
+    if getattr(root, "_wheel_bound", False):
+        return
+    root._wheel_bound = True
+
+    def on_wheel(e):
+        w = e.widget
+        while isinstance(w, tk.Misc):
+            if isinstance(w, (tk.Text, tk.Listbox)) or w.winfo_class() == "Treeview":
+                return
+            if getattr(w, "wheel", None):
+                return w.wheel(e)
+            w = w.master
+    root.bind_all("<MouseWheel>", on_wheel)
