@@ -1,6 +1,8 @@
-"""Windows glue: foreground app, clipboard paste, tkinter overlay."""
-import logging, queue, time, tkinter as tk
+"""Windows glue: foreground app, clipboard paste/type, DPI, window placement helpers."""
+import ctypes, time
+from ctypes import wintypes
 import keyboard, pyperclip, win32api, win32gui, win32process
+from .theme import FILL, TEXT
 
 
 def active_app():
@@ -36,6 +38,10 @@ def insert(text, cfg):
         paste(text)
 
 
+def undo():
+    keyboard.send("ctrl+z")
+
+
 def copy_selection():
     """Selected text via ctrl+c, or None if nothing was copied."""
     old = pyperclip.paste()
@@ -47,89 +53,85 @@ def copy_selection():
     return got or None
 
 
-class Overlay:
-    """Non-activating HUD. Owns the tk root: run() on the main thread, post() from others.
+def to_clipboard(text):
+    pyperclip.copy(text)
 
-    Never withdrawn/deiconified after startup (that steals focus); shown by toggling alpha.
+
+def dpi_aware():
+    """Real-pixel rendering, per-monitor v2 (call first thing in main, before any window): no bitmap-stretched blur.
+
+    ponytail: Tk 8.6 doesn't follow WM_DPICHANGED, so scale is read once from the system DPI; mixed-DPI monitors
+    would need GetDpiForWindow per move.
     """
-
-    W = 700
-
-    def __init__(self):
-        prev = win32gui.GetForegroundWindow()  # tk init steals focus; give it back below
-        self.q = queue.Queue()
-        self.level, self.recording = 0.0, False  # level is written by the audio thread
-        self.root = r = tk.Tk()
-        r.overrideredirect(True)
-        r.attributes("-topmost", True, "-alpha", 0.0)
-        r.configure(bg="#111111")
-        top = tk.Frame(r, bg="#111111"); top.pack(padx=10, pady=(8, 0), anchor="w", fill="x")
-        self.dot = tk.Label(top, text="●", bg="#111111", font=("Segoe UI", 11)); self.dot.pack(side="left")
-        self.head = tk.Label(top, fg="#bbbbbb", bg="#111111", font=("Segoe UI", 10)); self.head.pack(side="left", padx=(4, 0))
-        self.bar = tk.Canvas(r, width=200, height=4, bg="#222222", highlightthickness=0)
-        self.bar.pack(padx=10, pady=(4, 0), anchor="w")
-        self.fill = self.bar.create_rectangle(0, 0, 0, 4, fill="#44cc66", width=0)
-        self.raw = tk.Label(r, fg="#888888", bg="#111111", wraplength=680, justify="left", font=("Segoe UI", 11))
-        self.cleaned = tk.Label(r, fg="#ffffff", bg="#111111", wraplength=680, justify="left", font=("Segoe UI", 12))
-        self.raw.pack(padx=10, anchor="w")
-        self.cleaned.pack(padx=10, pady=(0, 8), anchor="w")
-        self._place()
-        r.deiconify(); r.update()
-        hwnd = win32gui.GetParent(r.winfo_id()) or r.winfo_id()
-        ex = win32gui.GetWindowLong(hwnd, -20)
-        # NOACTIVATE|TOOLWINDOW|TRANSPARENT: never takes focus, no taskbar entry, click-through
-        win32gui.SetWindowLong(hwnd, -20, ex | 0x08000000 | 0x80 | 0x20)
+    try:
+        if not ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
         try:
-            win32gui.SetForegroundWindow(prev)
+            ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
 
-    def _place(self):
-        self.root.update_idletasks()
-        h = self.root.winfo_reqheight()
-        self.root.geometry(f"{self.W}x{h}+{(self.root.winfo_screenwidth() - self.W) // 2}+{self.root.winfo_screenheight() - h - 90}")
 
-    def post(self, fn):
-        self.q.put(fn)
+def dpi_scale(root=None):
+    try:
+        return ctypes.windll.user32.GetDpiForSystem() / 96
+    except Exception:
+        return 1.0
 
-    def _run_task(self, fn):
-        try:
-            fn()
-        except Exception:
-            logging.getLogger("murmur").exception("overlay task failed")
 
-    def _tick(self):
-        while not self.q.empty():
-            self._run_task(self.q.get())
-        if not self.recording:
-            return
-        self.bar.coords(self.fill, 0, 0, min(1.0, self.level * 10) * 200, 4)
+def foreground():
+    return win32gui.GetForegroundWindow()
 
-    def run(self):
-        def poll():
-            try:
-                self._tick()
-            finally:
-                self.root.after(50, poll)
-        poll()
-        self.root.mainloop()
 
-    def header(self, color, text):
-        self.dot.config(fg=color)
-        self.head.config(text=text)
-        self._place()
+def refocus(hwnd):
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
 
-    def show(self, color, text):
-        self.recording = True
-        self.raw.config(text=""); self.cleaned.config(text="")
-        self.header(color, text)
-        self.root.attributes("-alpha", 0.92)
 
-    def update(self, raw, cleaned):
-        self.raw.config(text=raw)
-        self.cleaned.config(text=cleaned)
-        self._place()
+def no_activate(root):
+    """NOACTIVATE|TOOLWINDOW: clicks and showing never take focus from the target field; no taskbar entry."""
+    hwnd = win32gui.GetParent(root.winfo_id()) or root.winfo_id()
+    win32gui.SetWindowLong(hwnd, -20, win32gui.GetWindowLong(hwnd, -20) | 0x08000000 | 0x80)
 
-    def hide(self):
-        self.recording = False
-        self.root.attributes("-alpha", 0.0)
+
+def work_area(point):
+    """(l, t, r, b) work area of the monitor containing point (None = primary)."""
+    return win32api.GetMonitorInfo(win32api.MonitorFromPoint(point or (0, 0), 2))["Work"]
+
+
+class _GTI(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD)] + [
+        (n, wintypes.HWND) for n in ("hwndActive", "hwndFocus", "hwndCapture", "hwndMenuOwner", "hwndMoveSize", "hwndCaret")
+    ] + [("rcCaret", wintypes.RECT)]
+
+
+def caret_rect():
+    """Screen rect of the foreground thread's caret, or None (many modern apps don't expose one)."""
+    try:
+        user32 = ctypes.windll.user32
+        tid = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+        gti = _GTI(); gti.cbSize = ctypes.sizeof(_GTI)
+        if not user32.GetGUIThreadInfo(tid, ctypes.byref(gti)) or not gti.hwndCaret:
+            return None
+        r = gti.rcCaret
+        l, t = win32gui.ClientToScreen(gti.hwndCaret, (r.left, r.top))
+        rr, b = win32gui.ClientToScreen(gti.hwndCaret, (r.right, r.bottom))
+        return (l, t, max(rr, l + 1), b)
+    except Exception:
+        return None
+
+
+def style_window(top):
+    """Dark title bar and rounded corners (Windows 11); silently ignored where unsupported."""
+    try:
+        top.update_idletasks()  # the frame hwnd only exists once the window is realised
+        hwnd = win32gui.GetParent(top.winfo_id()) or top.winfo_id()
+        bgr = lambda h: int(h[5:7] + h[3:5] + h[1:3], 16)  # COLORREF is 0x00BBGGRR
+        # IMMERSIVE_DARK_MODE, WINDOW_CORNER_PREFERENCE=ROUND, CAPTION_COLOR=card fill, TEXT_COLOR
+        for attr, val in ((20, 1), (33, 2), (35, bgr(FILL)), (36, bgr(TEXT))):
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(val)), 4)
+    except Exception:
+        pass

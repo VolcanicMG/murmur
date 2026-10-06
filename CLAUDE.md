@@ -26,6 +26,17 @@ cmd.exe can't cd to UNC; PowerShell can.
 - The UIA ValuePattern fallback treats the caret as end-of-field.
 - Command mode copies the selection on key release (not press) and skips `[apps] no_copy` apps.
 
+## Packaging
+`murmur.spec` + `packaging/build.sh` build a one-file windowed exe (entry stub `packaging/entry.py`). Frozen gotchas: onnx-asr needs `copy_metadata` and its data files; a windowed exe hides startup tracebacks, so debug with a `console=True` copy of the spec.
+
+## Overlay / card gotchas
+- Design source of truth: `C:\Users\ethan\Downloads\Dictation software interface design\design_handoff_dictation_caption_card\README.md`.
+- Tk has no per-pixel alpha, so the card is drawn on a chroma-key window (`-transparentcolor #010203`) with `-alpha 0.96`; rounded shape and tail are polygons. No shadow and no acrylic backdrop (a keyed window can't take either). DWM corner/dark attributes are used only on the settings window.
+- The process is DPI-aware (`win.dpi_aware()` before any Tk root); every card/settings pixel size is multiplied by `win.dpi_scale()`.
+- Esc/Enter use `keyboard.hook_key(..., suppress=True)` (callback returns False) only while a live session card is up, and `keyboard.unhook` on every state change away from live states and in `hide()`. NEVER use `add_hotkey(suppress=True)` + `remove_hotkey`: it leaves `_listener.blocking_hotkeys` non-empty, which enables the lib's modifier-replay logic and holds back ctrl/alt app-wide.
+- The card window is NOACTIVATE|TOOLWINDOW but clickable (Retry); hidden = alpha 0 and moved off-screen, never withdrawn.
+- Card state changes come from the session via `ov.post(...)`; never touch Tk off the main thread. `ov.release()` ends a session but keeps self-dismissing states (Pasted, errors) on screen.
+
 ## Architecture & extension points
 - `__main__.py`: argparse, logging, LM Studio startup, selftest, learn.
 - `app.py`: tray wiring, hotkey press/release, fix-last editor, shared state `S`.
@@ -34,8 +45,11 @@ cmd.exe can't cd to UNC; PowerShell can.
 - `brain.py`: prompt sections, snippets, dictionary/style learning, output tidy. No win32.
 - `llm.py`: provider request shaping only (openai-compatible, anthropic).
 - `stt.py`: Parakeet load/recognize.
-- `store.py`: `~/.murmur` files, defaults, history, stats, minimal TOML writer (`dump_toml`).
-- `settings.py`: tkinter settings/history window (Tk main thread only; each tab builder returns `(frame, load)`).
-- `win.py`: foreground app, clipboard/paste/type, overlay.
+- `store.py`: `~/.murmur` files, defaults, history, stats, minimal TOML writer (`dump_toml`), `save_config` (round-trip checked, atomic), `form_to_cfg` (form validation), `resolve_device`.
+- `settings.py`: tkinter settings/history window (Tk main thread only; each tab builder returns `(frame, load)`). Config is a form of Panel cards over `store.merged_config()`; each control has `get()/set()` and is registered in a `fields` map by `section.key`.
+- `card.py`: the caption-card overlay (one Canvas, Tk main thread; `post()` queue). Pure helpers `bar_heights`, `place`, `norm_level` are tested.
+- `theme.py`: shared tokens, `blend()`, fonts, `rounded_points()` for card, tray icon and settings (pure).
+- `tray.py`: PIL tray icon (product bubble from `packaging/icon.png`, recoloured per state; procedural fallback) + tooltip per state (`mark(state)` in app.py).
+- `win.py`: foreground app, clipboard/paste/type, DPI, caret/work-area helpers, dark title bar.
 
-To add: a settings tab -> a `_x_tab` builder in `settings.py` listed in `open_settings`; an STT backend -> `stt.py` `load_model`/`recognize` contract; an LLM provider -> `llm.py` `chat()`; a tone -> `[tones]` in config (+ `[apps]`); a prompt section -> a function in `brain.SECTIONS`; a context source -> `context.gather`; an output method -> `win.insert`; a hotkey trigger mode -> `app.py` `press`/`release`; a spoken command -> `session.COMMANDS` (phase 2c).
+To add: a settings tab -> a `_x_tab` builder in `settings.py` listed in `open_settings`; an STT backend -> `stt.py` `load_model`/`recognize` contract; an LLM provider -> `llm.py` `chat()`; a tone -> `[tones]` in config (+ `[apps]`); a prompt section -> a function in `brain.SECTIONS`; a context source -> `context.gather`; an output method -> `win.insert`; a hotkey trigger mode -> `app.py` `press`/`release`; a spoken command -> a `brain.COMMANDS` phrase entry + a `Session._cmd_<name>` method.

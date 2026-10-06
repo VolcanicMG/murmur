@@ -15,7 +15,7 @@ mkdir -p "$BUILD_DIR/packaging"
 cp -r "$REPO/murmur" "$BUILD_DIR/"
 cp "$REPO/murmur.spec" "$BUILD_DIR/"
 cp "$REPO/packaging/entry.py" "$BUILD_DIR/packaging/"
-cp "$REPO/packaging/murmur.ico" "$BUILD_DIR/packaging/"
+cp "$REPO/packaging/murmur.ico" "$REPO/packaging/icon.png" "$BUILD_DIR/packaging/"
 find "$BUILD_DIR/murmur" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 echo "[2/3] Running PyInstaller (Windows Python) ..."

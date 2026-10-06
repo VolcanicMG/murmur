@@ -47,6 +47,39 @@ class T(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.save_tones({"casual": "c"})
 
+    def test_save_config_round_trip_and_refusal(self):
+        cfg = store.merged_config(); cfg["llm"]["model"] = "m"
+        store.save_config(cfg)
+        self.assertEqual(store.load_config(), cfg)
+        before = (store.HOME / "config.toml").read_text(encoding="utf-8")
+        with self.assertRaises(ValueError):
+            store.save_config({**cfg, "apps": {"x": {"nested": "y"}}})
+        self.assertEqual((store.HOME / "config.toml").read_text(encoding="utf-8"), before)
+
+    def test_merged_config_fills_defaults(self):
+        m = store.merged_config({"llm": {"model": "x"}, "apps": {"a.exe": "code"}})
+        self.assertEqual((m["llm"]["model"], m["llm"]["timeout"], m["hotkeys"]["dictate"]), ("x", 15, "right ctrl"))
+        self.assertEqual(m["apps"], {"a.exe": "code"})
+
+    def test_resolve_device(self):
+        devs = [{"name": "Speakers", "max_input_channels": 0}, {"name": "Microphone (USB Audio)", "max_input_channels": 1},
+                {"name": "Mic Array", "max_input_channels": 2}]
+        self.assertEqual(store.resolve_device("Mic Array", devs), 2)
+        self.assertEqual(store.resolve_device("usb", devs), 1)
+        self.assertIsNone(store.resolve_device("Speakers", devs))  # output only
+        self.assertIsNone(store.resolve_device("gone", devs)); self.assertIsNone(store.resolve_device("", devs))
+
+    def test_form_to_cfg(self):
+        base = store.merged_config()
+        vals = {"hotkeys.dictate": " f9 ", "llm.timeout": "20", "llm.live_clean": False, "apps": {"a.exe": "code"}, "no_copy": ["wt.exe"]}
+        c = store.form_to_cfg(vals, base)
+        self.assertEqual((c["hotkeys"]["dictate"], c["llm"]["timeout"], c["llm"]["live_clean"]), ("f9", 20, False))
+        self.assertEqual(c["apps"], {"a.exe": "code", "no_copy": ["wt.exe"]})
+        self.assertEqual(base["hotkeys"]["dictate"], "right ctrl")  # base untouched
+        for bad in ({"llm.timeout": "x"}, {"context.before_chars": "-1"}, {"hotkeys.fix_last": " "}, {"llm.url": "ftp://x"}):
+            with self.assertRaises(ValueError):
+                store.form_to_cfg(bad, base)
+
     def test_add_terms_newline(self):
         (store.HOME / "dictionary.txt").write_text("# c\nFoo", encoding="utf-8")
         store.add_terms(["Bar"])

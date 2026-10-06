@@ -1,4 +1,5 @@
-import argparse, logging, subprocess, sys, time, wave
+import argparse, logging, os, subprocess, sys, tempfile, time, wave
+from pathlib import Path
 import numpy as np
 from . import brain, store, stt
 
@@ -27,12 +28,23 @@ def start_llm(cfg):
         log.info("llm warmup failed: %s", e)
 
 
-def selftest():
-    import os
+def boot(cfg):
+    """Load the speech model (first run downloads ~600 MB) and make sure the LLM is up."""
+    log.info("loading speech model (the first run downloads ~600 MB, one time)")
+    stt.load_model(cfg)
+    start_llm(cfg)
+
+
+def selftest(real=False):
+    """Transcribe + clean test.wav. Default runs against a fresh temp HOME with default files so user data
+    (style.md, dictionary, history) can't change the result; --real uses ~/.murmur."""
+    wav = store.HOME / "test.wav"
+    if not real:
+        store.HOME = Path(tempfile.mkdtemp(prefix="murmur-selftest-"))
     store.ensure()
     cfg = store.load_config()
     t = time.time(); stt.load_model(cfg); print(f"stt load {time.time() - t:.1f}s")
-    with wave.open(str(store.HOME / "test.wav")) as w:
+    with wave.open(str(wav)) as w:
         audio = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
     t = time.time(); raw = stt.recognize(audio); print(f"raw ({time.time() - t:.2f}s): {raw}")
     ctx = {"cfg": cfg, "tone": "casual", "terms": ["Podstead"]}
@@ -55,28 +67,41 @@ def learn(cfg):
 
 
 def main():
+    if os.name == "nt":
+        from . import win
+        win.dpi_aware()  # before any window exists
     ap = argparse.ArgumentParser(prog="murmur", description="Local voice dictation")
     ap.add_argument("cmd", nargs="?", choices=["learn"], help="learn: rebuild style.md from history")
-    ap.add_argument("--settings", action="store_true", help="open the settings window only")
-    ap.add_argument("--selftest", action="store_true", help="transcribe+clean test.wav, no hotkeys")
+    ap.add_argument("--settings", nargs="?", const="History", metavar="TAB", help="open the settings window only (optionally on TAB)")
+    ap.add_argument("--demo-card", nargs="?", const="", metavar="STATE", help="show the caption card with fake data (cycles states, or freezes STATE)")
+    ap.add_argument("--demo-tray", metavar="STATE", help="save the tray icon for STATE to ~/.murmur/shots/")
+    ap.add_argument("--selftest", action="store_true", help="transcribe+clean test.wav, no hotkeys (fresh temp HOME)")
+    ap.add_argument("--real", action="store_true", help="with --selftest: use ~/.murmur instead of a fresh temp HOME")
     a = ap.parse_args()
     store.ensure()
     if a.selftest:
-        return selftest()
+        return selftest(a.real)
+    if a.demo_card is not None:
+        from . import card
+        return card.demo(a.demo_card or None)
+    if a.demo_tray:
+        from .tray import tray_image
+        shots = store.HOME / "shots"; shots.mkdir(exist_ok=True)
+        for size in (64, 16):
+            tray_image(a.demo_tray, size).save(shots / f"tray-{a.demo_tray}-{size}.png")
+        return
     if a.settings:
         from . import settings
         from .app import fix_last
-        return settings.run_standalone(store.load_config(), fix_last)
+        return settings.run_standalone(store.load_config(), fix_last, a.settings)
     setup_logging()
     cfg = store.load_config()
     if a.cmd == "learn":
         return learn(cfg)
     if cfg.get("context", {}).get("enabled", True) and cfg["llm"].get("provider", "openai") != "openai":
         log.warning("[context] enabled with a remote LLM provider: text around your cursor is sent to it")
-    stt.load_model(cfg)
-    start_llm(cfg)
     from .app import tray_app
-    tray_app(cfg, learn)
+    tray_app(cfg, learn, boot)
 
 
 if __name__ == "__main__":

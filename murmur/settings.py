@@ -1,59 +1,537 @@
-"""Settings + history window (tkinter, Tk main thread only). Each tab builder returns (frame, load)."""
-import tkinter as tk, tomllib
+"""Settings + history window in the caption-card design language (tkinter, Tk main thread only).
+Each page builder returns (page, load); load() (re)fills the page from disk."""
+import queue, sys, threading, tkinter as tk, tkinter.font as tkfont, tomllib
+from pathlib import Path
 from tkinter import ttk
+from types import SimpleNamespace
 import pyperclip
-from . import store
+from . import store, win
+from .theme import ACCENT, ERROR, FILL, NAME, ON_ACCENT, SECONDARY, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts, rounded_points
 
-BG, FG, BOX, MONO = "#1e1e1e", "#d4d4d4", "#252526", ("Consolas", 10)
+SECTIONS = {
+    "History": "Everything murmur has typed for you. Fix a row to teach it new spellings.",
+    "Dictionary": "Preferred spellings. Cleanup is nudged toward these words.",
+    "Snippets": "Say \u201cinsert <name>\u201d to expand a snippet.",
+    "Prompt": "The cleanup rules sent to the LLM with every dictation.",
+    "Tones": "How murmur writes in each kind of app. Map apps to tones in Config.",
+    "Config": "Hotkeys, models and apps. Advanced holds the raw config.toml.",
+}
+HAIR, FIELD, SIDEBAR, SEL = on_fill(0.10), on_fill(0.04), on_fill(0.03), blend(ACCENT, FILL, 0.30)
+DANGER_TEXT = "#2A1412"
 
 
-def _style(top):
+def icon_path():
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))  # frozen exe unpacks to _MEIPASS
+    return base / "packaging" / "murmur.ico"
+
+
+def status_kind(text):
+    low = text.lower()
+    if low.startswith("saved") and "failed" not in low:
+        return "success"
+    return "error" if any(w in low for w in ("failed", "not saved", "can't", "cannot")) else "info"
+
+
+class _Round(tk.Canvas):
+    """Canvas that redraws a rounded shape plus content whenever it is resized or hovered."""
+
+    def __init__(self, parent, ui, height, **kw):
+        super().__init__(parent, height=ui.k(height), bg=parent.cget("bg"), highlightthickness=0, bd=0, **kw)
+        self.ui, self.hover = ui, False
+        self.bind("<Configure>", lambda e: self.draw())
+
+    def shape(self, r, fill, outline=""):
+        w, h = self.winfo_width(), self.winfo_height()
+        self.create_polygon(rounded_points((0.5, 0.5, w - 0.5, h - 0.5), self.ui.k(r)), fill=fill, outline=outline)
+
+    def draw(self):
+        self.delete("all")
+        self.paint()
+
+
+class Pill(_Round):
+    """32 px pill button: primary (accent), secondary (hairline), danger (error)."""
+
+    def __init__(self, parent, ui, text, command, kind="secondary"):
+        super().__init__(parent, ui, 32, cursor="hand2")
+        self.text, self.command, self.kind = text, command, kind  # 14 px horizontal padding, 32 px tall for every kind
+        self.config(width=ui.fonts["pill"].measure(text) + ui.k(28))
+        self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
+        self.bind("<ButtonRelease-1>", lambda e: self.command() if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height() else None)
+
+    def _hover(self, on):
+        self.hover = on
+        self.draw()
+
+    def paint(self):
+        """Pill from two end-cap ovals + a rectangle (filled) or arcs + lines (hairline); integer coords, radius = h/2."""
+        bg, w, h = self.cget("bg"), self.winfo_width(), self.winfo_height()
+        fill, fg, line = {"primary": (ACCENT, ON_ACCENT, ""), "danger": (ERROR, DANGER_TEXT, ""),
+                          "secondary": ("", NAME, on_fill(0.14))}[self.kind]
+        if self.hover:
+            fill = blend(WHITE, fill or bg, 0.08)
+        r = h // 2
+        if fill:
+            self.create_oval(0, 0, h - 1, h - 1, fill=fill, outline="")
+            self.create_oval(w - h, 0, w - 1, h - 1, fill=fill, outline="")
+            self.create_rectangle(r, 0, w - r, h, fill=fill, outline="")
+        if line:
+            self.create_arc(0, 0, h - 1, h - 1, start=90, extent=180, style="arc", outline=line)
+            self.create_arc(w - h, 0, w - 1, h - 1, start=270, extent=180, style="arc", outline=line)
+            self.create_line(r, 0, w - r, 0, fill=line); self.create_line(r, h - 1, w - r, h - 1, fill=line)
+        self.create_text(w / 2, h / 2, text=self.text, fill=fg, font=self.ui.fonts["pill"])
+
+
+class Chip(_Round):
+    """Sidebar section chip in the card's status-chip style."""
+
+    def __init__(self, parent, ui, text, command):
+        super().__init__(parent, ui, 30, cursor="hand2")
+        self.text, self.active = text, False
+        self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
+        self.bind("<Button-1>", lambda e: command())
+
+    def _hover(self, on):
+        self.hover = on
+        self.draw()
+
+    def set_active(self, on):
+        self.active = on
+        self.draw()
+
+    def paint(self):
+        k, h = self.ui.k, self.winfo_height()
+        if self.active or self.hover:
+            self.shape(15, on_fill(0.08 if self.active else 0.04))
+        if self.active:
+            r = k(3)
+            self.create_oval(k(14) - r, h / 2 - r, k(14) + r, h / 2 + r, fill=ACCENT, outline="")
+        self.create_text(k(26), h / 2, text=self.text, anchor="w", fill=ACCENT if self.active else SECONDARY, font=self.ui.fonts["chip"])
+
+
+class Tile(_Round):
+    """Stat tile: small label over a large value."""
+
+    def __init__(self, parent, ui, label):
+        super().__init__(parent, ui, 64, width=ui.k(10))  # natural width small so the row shares space evenly
+        self.label, self.value = label, "-"
+
+    def set(self, value):
+        self.value = str(value)
+        self.draw()
+
+    def paint(self):
+        k = self.ui.k
+        self.shape(12, FIELD)
+        self.create_text(k(14), k(18), text=self.label, anchor="w", fill=SECONDARY, font=self.ui.fonts["label"])
+        self.create_text(k(14), k(42), text=self.value, anchor="w", fill=TEXT, font=self.ui.fonts["tile"])
+
+
+class Status(tk.Frame):
+    """Bottom status line: kind dot + message."""
+
+    def __init__(self, parent, ui):
+        super().__init__(parent, bg=FILL)
+        self.dot = tk.Canvas(self, width=ui.k(8), height=ui.k(8), bg=FILL, highlightthickness=0)
+        self.dot.pack(side="left", padx=(0, ui.k(8)))
+        self.label = tk.Label(self, bg=FILL, fg=SECONDARY, font=ui.fonts["small"], anchor="w")
+        self.label.pack(side="left")
+        self.ui = ui
+        self.set("")
+
+    def set(self, text, kind=None):
+        col = {"success": SUCCESS, "error": ERROR}.get(kind or status_kind(text), SECONDARY)
+        self.dot.delete("all")
+        if text:
+            self.dot.create_oval(0, 0, self.ui.k(8) - 1, self.ui.k(8) - 1, fill=col, outline="")
+        self.label.config(text=text, fg=col if kind or text else SECONDARY)
+
+
+INPUT = on_fill(0.08)  # input fill inside a card (cards are FIELD)
+
+
+class Toggle(tk.Canvas):
+    """44x24 pill switch: accent track when on, knob slides. get()/set() like the other form controls."""
+
+    def __init__(self, parent, ui):
+        k = ui.k
+        super().__init__(parent, width=k(44), height=k(24), bg=parent.cget("bg"), highlightthickness=0, bd=0, cursor="hand2")
+        self.k, self.on, self.pos = k, False, 0.0
+        self.bind("<Button-1>", lambda e: self.set(not self.on, animate=True))
+        self.draw()
+
+    def get(self):
+        return self.on
+
+    def set(self, on, animate=False):
+        self.on = bool(on)
+        if animate:
+            self._slide()
+        else:
+            self.pos = float(self.on); self.draw()
+
+    def _slide(self):
+        goal = float(self.on)
+        self.pos += max(-0.34, min(0.34, goal - self.pos))
+        self.draw()
+        if self.pos != goal:
+            self.after(16, self._slide)
+
+    def draw(self):
+        k, h, w = self.k, self.k(24), self.k(44)
+        self.delete("all")
+        col = blend(ACCENT, on_fill(0.14), self.pos)
+        self.create_oval(0, 0, h - 1, h - 1, fill=col, outline=""); self.create_oval(w - h, 0, w - 1, h - 1, fill=col, outline="")
+        self.create_rectangle(h // 2, 0, w - h // 2, h, fill=col, outline="")
+        x, r = k(3) + self.pos * (w - h), h // 2 - k(3)
+        self.create_oval(x, k(3), x + 2 * r, k(3) + 2 * r, fill=ON_ACCENT if self.on else NAME, outline="")
+
+
+class TextField(tk.Entry):
+    """Flat entry with get()/set(); `digits` restricts input to whole numbers."""
+
+    def __init__(self, parent, ui, width=20, digits=False):
+        super().__init__(parent, relief="flat", bd=0, bg=INPUT, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
+                         highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, font=ui.fonts["body"], width=width)
+        if digits:
+            self.config(validate="key", validatecommand=(self.register(lambda v: v == "" or v.isdigit()), "%P"))
+
+    def set(self, v):
+        self.delete(0, "end"); self.insert(0, str(v))
+
+
+class Select(tk.OptionMenu):
+    """Flat dropdown; reset(options) swaps the choices."""
+
+    def __init__(self, parent, ui, options, var=None):
+        self.var, self.ui = var or tk.StringVar(value=options[0] if options else ""), ui
+        super().__init__(parent, self.var, *options)
+        self.config(bg=INPUT, fg=TEXT, activebackground=on_fill(0.14), activeforeground=TEXT, highlightthickness=1, highlightbackground=HAIR,
+                    relief="flat", bd=0, font=ui.fonts["body"], anchor="w", padx=ui.k(10), pady=ui.k(3), cursor="hand2", width=min(max([len(o) for o in options] + [8]), 34))
+        self["menu"].config(bg=blend(WHITE, FILL, 0.10), fg=TEXT, activebackground=SEL, activeforeground=TEXT, bd=0, relief="flat", font=ui.fonts["body"])
+
+    def reset(self, options):
+        menu = self["menu"]
+        menu.delete(0, "end")
+        for o in options:
+            menu.add_command(label=o, command=tk._setit(self.var, o))
+
+    def get(self):
+        return self.var.get()
+
+    def set(self, v):
+        self.var.set(v)
+
+
+DEFAULT_MIC = "System default"
+
+
+def input_devices():
+    """Input device labels "<name> (<hostapi>)", de-duplicated, as [(label, name)]; sounddevice imported lazily (Linux tests)."""
+    import sounddevice as sd
+    apis, seen, out = sd.query_hostapis(), set(), []
+    for d in sd.query_devices():
+        label = f"{d['name']} ({apis[d['hostapi']]['name']})"
+        if d["max_input_channels"] > 0 and label not in seen:
+            seen.add(label); out.append((label, d["name"]))
+    return out
+
+
+class MicField(tk.Frame):
+    """Input-device Select plus Test mic (1.5 s on a worker thread, peak level to the status line). Stores the device NAME."""
+
+    def __init__(self, parent, ui, status):
+        super().__init__(parent, bg=parent.cget("bg"))
+        self.status, self.q, self.names = status, queue.Queue(), {DEFAULT_MIC: ""}
+        try:
+            devs = input_devices()
+        except Exception:
+            devs = []
+        self.names.update(devs)
+        self.sel = Select(self, ui, list(self.names)); self.sel.pack(side="left")
+        Pill(self, ui, "Test mic", self.test).pack(side="left", padx=(ui.k(8), 0))
+
+    def get(self):
+        return self.names.get(self.sel.get(), "")
+
+    def set(self, name):
+        label = next((l for l, n in self.names.items() if n == name), None)
+        if label is None and name:  # configured device not present now: keep it selectable so a save doesn't drop it
+            label = f"{name} (not found)"; self.names[label] = name; self.sel.reset(list(self.names))
+        self.sel.set(label or DEFAULT_MIC)
+
+    def test(self):
+        self.status.set("Listening for 1.5 s\u2026", "info")
+        threading.Thread(target=self._rec, args=(self.get(),), daemon=True).start()
+        self.after(100, self._poll)
+
+    def _rec(self, name):
+        try:
+            import sounddevice as sd
+            idx = store.resolve_device(name, sd.query_devices())
+            data = sd.rec(int(1.5 * 16000), samplerate=16000, channels=1, dtype="float32", device=idx, blocking=True)
+            self.q.put(float(abs(data).max()))
+        except Exception as e:
+            self.q.put(e)
+
+    def _poll(self):
+        if not self.winfo_exists():
+            return
+        try:
+            res = self.q.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll); return
+        if isinstance(res, Exception):
+            self.status.set(f"Can't open the input: {res}", "error")
+        elif res < 0.01:
+            self.status.set("No signal \u2014 check the input", "error")
+        else:
+            self.status.set(f"Mic ok \u00b7 peak {res:.2f}", "success")
+
+
+class Tag(_Round):
+    """Small rounded label button (removable chip / Remove)."""
+
+    def __init__(self, parent, ui, text, command):
+        super().__init__(parent, ui, 26, cursor="hand2")
+        self.text = text
+        self.config(width=ui.fonts["small"].measure(text) + ui.k(22))
+        self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
+        self.bind("<Button-1>", lambda e: command())
+
+    def _hover(self, on):
+        self.hover = on
+        self.draw()
+
+    def paint(self):
+        self.shape(13, on_fill(0.14 if self.hover else 0.09))
+        self.create_text(self.winfo_width() / 2, self.winfo_height() / 2, text=self.text, fill=TEXT if self.hover else NAME, font=self.ui.fonts["small"])
+
+
+class HotkeyField(tk.Frame):
+    """Entry plus a Record pill: a worker thread runs keyboard.read_hotkey, the Tk side polls a queue (Esc cancels)."""
+
+    def __init__(self, parent, ui, status):
+        super().__init__(parent, bg=parent.cget("bg"))
+        self.status, self.q, self.busy = status, queue.Queue(), False
+        self.entry = TextField(self, ui, 22)
+        self.entry.pack(side="left", ipady=ui.k(5)); Pill(self, ui, "Record", self.record).pack(side="left", padx=(ui.k(8), 0))
+
+    def get(self):
+        return self.entry.get()
+
+    def set(self, v):
+        self.entry.set(v)
+
+    def record(self):
+        if self.busy:
+            return
+        self.busy = True
+        self.status.set("Press the keys… (Esc cancels)", "info")
+        threading.Thread(target=self._read, daemon=True).start()
+        self.after(100, self._poll)
+
+    def _read(self):
+        from .app import S
+        S["capturing"] = True  # the tray's own hotkeys must ignore what is being recorded
+        try:
+            import keyboard
+            name = keyboard.read_hotkey(suppress=False)
+            self.q.put(name if "+" in name else keyboard.normalize_name(name))
+        except Exception as e:
+            self.q.put(e)
+        finally:
+            S["capturing"] = False
+
+    def _poll(self):
+        if not self.winfo_exists():
+            return
+        try:
+            res = self.q.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll); return
+        self.busy = False
+        if isinstance(res, Exception):
+            self.status.set(f"Can't record keys: {res}", "error")
+        elif res == "esc":
+            self.status.set("Recording cancelled.", "info")
+        else:
+            self.set(res); self.status.set(f"Captured {res}. Save to apply.", "info")
+
+
+class Panel(tk.Canvas):
+    """Rounded card (radius 12, 16 px padding, 14 px section title); put rows in `.rows`."""
+
+    def __init__(self, parent, ui, title):
+        super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, bd=0, height=ui.k(40))
+        self.ui, self.pad = ui, ui.k(16)
+        inner = tk.Frame(self, bg=FIELD)
+        _label(inner, ui, title, "section", TEXT, FIELD).pack(anchor="w", pady=(0, ui.k(6)))
+        self.rows = tk.Frame(inner, bg=FIELD); self.rows.pack(fill="x")
+        self.win = self.create_window(self.pad, self.pad, window=inner, anchor="nw")
+        self.bind("<Configure>", self._resize)
+        inner.bind("<Configure>", lambda e: self.config(height=inner.winfo_reqheight() + 2 * self.pad))
+
+    def _resize(self, e):
+        self.itemconfig(self.win, width=e.width - 2 * self.pad)
+        self.delete("bg")
+        self.create_polygon(rounded_points((0.5, 0.5, e.width - 0.5, e.height - 0.5), self.ui.k(12)), fill=FIELD, outline=HAIR, tags="bg")
+        self.tag_lower("bg")
+
+
+class AppsTable(tk.Frame):
+    """process -> tone rows, each with a tone Select and Remove, plus an add row. get() -> {exe: tone}."""
+
+    def __init__(self, parent, ui):
+        super().__init__(parent, bg=FIELD)
+        self.ui, self.tones, self.vars = ui, [], {}
+        self.list = tk.Frame(self, bg=FIELD); self.list.pack(fill="x")
+        add = tk.Frame(self, bg=FIELD); add.pack(fill="x", pady=(ui.k(10), 0))
+        self.name = TextField(add, ui, 18); self.name.pack(side="left", ipady=ui.k(5))
+        self.pick = Select(add, ui, ["casual"]); self.pick.pack(side="left", padx=ui.k(8))
+        Pill(add, ui, "Add row", self.add).pack(side="left")
+
+    def get(self):
+        return {e: v.get() for e, v in self.vars.items()}
+
+    def set(self, apps, tones=None):
+        if tones is not None:
+            self.tones = tones; self.pick.reset(tones); self.pick.set(tones[0] if tones else "")
+        self.vars = {e: tk.StringVar(value=t) for e, t in apps.items() if isinstance(t, str)}
+        self.render()
+
+    def add(self):
+        if (exe := self.name.get().strip().lower()):
+            self.vars[exe] = tk.StringVar(value=self.pick.get()); self.name.set(""); self.render()
+
+    def remove(self, exe):
+        self.vars.pop(exe, None); self.render()
+
+    def render(self):
+        k = self.ui.k
+        for w in self.list.winfo_children():
+            w.destroy()
+        for exe, var in self.vars.items():
+            row = tk.Frame(self.list, bg=FIELD); row.pack(fill="x", pady=k(2))
+            _label(row, self.ui, exe, "body", NAME, FIELD).pack(side="left"); row.winfo_children()[0].config(width=22)
+            sel = Select(row, self.ui, self.tones + ([var.get()] if var.get() not in self.tones else []), var=var)
+            sel.pack(side="left", padx=k(8))
+            Tag(row, self.ui, "Remove", lambda e=exe: self.remove(e)).pack(side="left")
+
+
+class ChipList(tk.Frame):
+    """Removable exe-name chips (wrapping) plus an add entry. get() -> list."""
+
+    def __init__(self, parent, ui):
+        super().__init__(parent, bg=FIELD)
+        self.ui, self.items = ui, []
+        self.flow = tk.Frame(self, bg=FIELD); self.flow.pack(fill="x")
+        add = tk.Frame(self, bg=FIELD); add.pack(fill="x", pady=(ui.k(10), 0))
+        self.name = TextField(add, ui, 18); self.name.pack(side="left", ipady=ui.k(5))
+        Pill(add, ui, "Add", self.add).pack(side="left", padx=(ui.k(8), 0))
+        self.flow.bind("<Configure>", lambda e: self.render())
+
+    def get(self):
+        return list(self.items)
+
+    def set(self, items):
+        self.items = list(items); self.render()
+
+    def add(self):
+        if (n := self.name.get().strip().lower()) and n not in self.items:
+            self.items.append(n); self.name.set(""); self.render()
+
+    def render(self):
+        k, x, y, rowh = self.ui.k, 0, 0, self.ui.k(32)
+        limit = max(self.flow.winfo_width(), k(300))
+        for w in self.flow.winfo_children():
+            w.destroy()
+        for n in self.items:
+            t = Tag(self.flow, self.ui, f"{n}  ×", lambda n=n: (self.items.remove(n), self.render()))
+            w = int(t.cget("width"))
+            if x and x + w > limit:
+                x, y = 0, y + rowh
+            t.place(x=x, y=y); x += w + k(6)
+        self.flow.config(height=y + rowh)
+
+
+
+def _style(top, ui):
     st = ttk.Style(top)
     st.theme_use("clam")
-    st.configure(".", background=BG, foreground=FG, fieldbackground=BOX)
-    st.configure("Treeview", background=BOX, foreground=FG, fieldbackground=BOX)
-    st.configure("TNotebook.Tab", background=BOX, foreground=FG, padding=(10, 4))
-    st.map("TNotebook.Tab", background=[("selected", BG)])
+    k = ui.k
+    st.configure("Treeview", background=FIELD, fieldbackground=FIELD, foreground=TEXT, rowheight=k(28), borderwidth=0, font=ui.fonts["body"], bordercolor=FIELD, lightcolor=FIELD, darkcolor=FIELD)
+    st.configure("Treeview.Heading", background=on_fill(0.06), foreground=SECONDARY, relief="flat", borderwidth=0, font=ui.fonts["small"], padding=(k(8), k(6)))
+    st.map("Treeview", background=[("selected", SEL)], foreground=[("selected", TEXT)])
+    st.map("Treeview.Heading", background=[("active", on_fill(0.08))])
+    st.layout("Dark.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+        ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+    st.configure("Dark.Vertical.TScrollbar", troughcolor=FILL, background=on_fill(0.12), bordercolor=FILL, lightcolor=on_fill(0.12), darkcolor=on_fill(0.12), width=k(10))
+    st.map("Dark.Vertical.TScrollbar", background=[("active", on_fill(0.22))])
 
 
-def _text(parent, height=12):
-    return tk.Text(parent, bg=BOX, fg=FG, insertbackground=FG, font=MONO, height=height, wrap="word", undo=True)
+def _entry(parent, ui, bg=FIELD):
+    return tk.Entry(parent, relief="flat", bd=0, bg=bg, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
+                    highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, font=ui.fonts["body"])
 
 
-def _buttons(parent, *pairs):
-    bar = ttk.Frame(parent)
-    first = parent.pack_slaves()
-    bar.pack(side="bottom", fill="x", padx=8, pady=4, **({"before": first[0]} if first else {}))  # reserve space before the tab body expands
-    for label, cmd in pairs:
-        ttk.Button(bar, text=label, command=cmd).pack(side="left", padx=2)
+def _text(parent, ui, height=12, mono=True):
+    return tk.Text(parent, relief="flat", bd=0, bg=FIELD, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
+                   highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, height=height, wrap="word", undo=True,
+                   padx=ui.k(10), pady=ui.k(8), font=ui.fonts["mono" if mono else "body"])
+
+
+def _listbox(parent, ui, height=12):
+    return tk.Listbox(parent, relief="flat", bd=0, bg=FIELD, fg=TEXT, selectbackground=SEL, selectforeground=TEXT, activestyle="none",
+                      highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, height=height, font=ui.fonts["body"], exportselection=False)
+
+
+def _scrolled(parent, make):
+    """(frame, widget): widget with a dark vertical scrollbar."""
+    box = tk.Frame(parent, bg=FILL)
+    w = make(box)
+    sb = ttk.Scrollbar(box, style="Dark.Vertical.TScrollbar", orient="vertical", command=w.yview)
+    w.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y", padx=(4, 0)); w.pack(side="left", fill="both", expand=True)
+    return box, w
+
+
+def _label(parent, ui, text, role="small", fg=SECONDARY, bg=FILL):
+    return tk.Label(parent, text=text, bg=bg, fg=fg, font=ui.fonts[role], anchor="w")
+
+
+def _page(content, ui, title, desc):
+    f = tk.Frame(content, bg=FILL)
+    _label(f, ui, title, "title", TEXT).pack(anchor="w", padx=ui.k(20), pady=(ui.k(20), 0))
+    _label(f, ui, desc, "body").pack(anchor="w", padx=ui.k(20), pady=(ui.k(4), ui.k(14)))
+    bar = tk.Frame(f, bg=FILL); bar.pack(side="bottom", fill="x", padx=ui.k(20), pady=(ui.k(12), ui.k(8)))  # packed before the body so it stays visible
+    body = tk.Frame(f, bg=FILL); body.pack(fill="both", expand=True, padx=ui.k(20))
+    return SimpleNamespace(frame=f, body=body, bar=bar)
+
+
+def _pills(page, ui, *specs):
+    for label, cmd, kind in specs:
+        Pill(page.bar, ui, label, cmd, kind).pack(side="left", padx=(0, ui.k(8)))
 
 
 def _set(box, text):
     box.delete("1.0", "end"); box.insert("1.0", text)
 
 
-def _tab(nb, title):
-    f = ttk.Frame(nb); nb.add(f, text=title)
-    return f
-
-
 def _row_values(r):
     return r.get("ts", "").replace("T", " "), r.get("app", ""), r.get("tone", ""), r["final"][:100].replace("\n", " ")
 
 
-def _stats_line():
-    s = store.stats(store.read_history())
-    saved = f"~{s['minutes_saved']:.0f} min saved"
-    return f"{s['dictations']} dictations \u00b7 {s['words']} words \u00b7 {saved} \u00b7 {s['week_words']} words this week"
-
-
-def _history_tab(nb, root, fix):
-    f, rows = _tab(nb, "History"), []
-    head = ttk.Label(f); head.pack(anchor="w", padx=8, pady=4)
-    tree = ttk.Treeview(f, columns=("time", "app", "tone", "text"), show="headings", height=14)
-    for col, w in (("time", 140), ("app", 110), ("tone", 60), ("text", 520)):
-        tree.heading(col, text=col); tree.column(col, width=w, anchor="w")
-    tree.pack(fill="both", expand=True, padx=8)
+def _history_page(content, ui, root, fix):
+    pg, rows, k = _page(content, ui, "History", SECTIONS["History"]), [], ui.k
+    strip = tk.Frame(pg.body, bg=FILL); strip.pack(fill="x", pady=(0, k(12)))
+    tiles = {n: Tile(strip, ui, n) for n in ("Dictations", "Words", "Minutes saved", "This week")}
+    for i, t in enumerate(tiles.values()):
+        t.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else k(8), 0))
+    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "app", "tone", "text"), show="headings", height=10))
+    for col, w in (("time", 150), ("app", 120), ("tone", 70), ("text", 460)):
+        tree.heading(col, text=col.capitalize(), anchor="w"); tree.column(col, width=k(w), anchor="w")
+    box.pack(fill="both", expand=True)
 
     def current():
         sel = tree.selection()
@@ -64,7 +542,9 @@ def _history_tab(nb, root, fix):
         tree.delete(*tree.get_children())
         for i, r in enumerate(rows):
             tree.insert("", "end", iid=str(i), values=_row_values(r))
-        head.config(text=_stats_line())
+        s = store.stats(store.read_history())
+        for name, v in zip(tiles, (s["dictations"], s["words"], f"~{s['minutes_saved']:.0f} min", s["week_words"])):
+            tiles[name].set(v)
 
     def copy():
         if r := current():
@@ -77,14 +557,15 @@ def _history_tab(nb, root, fix):
     def delete():
         if r := current():
             store.delete_row(r["ts"], r["final"]); load()
-    _buttons(f, ("Copy", copy), ("Fix\u2026", fix_row), ("Delete row", delete), ("Refresh", load))
-    return f, load
+    _pills(pg, ui, ("Copy", copy, "primary"), ("Fix\u2026", fix_row, "secondary"), ("Delete row", delete, "danger"), ("Refresh", load, "secondary"))
+    return pg, load
 
 
-def _dictionary_tab(nb):
-    f = _tab(nb, "Dictionary")
-    lb = tk.Listbox(f, bg=BOX, fg=FG, font=MONO, height=14); lb.pack(fill="both", expand=True, padx=8, pady=8)
-    entry = ttk.Entry(f); entry.pack(fill="x", padx=8)
+def _dictionary_page(content, ui):
+    pg = _page(content, ui, "Dictionary", SECTIONS["Dictionary"])
+    box, lb = _scrolled(pg.body, lambda p: _listbox(p, ui))
+    box.pack(fill="both", expand=True)
+    entry = _entry(pg.body, ui); entry.pack(fill="x", pady=(ui.k(12), 0), ipady=ui.k(6))
 
     def load():
         lb.delete(0, "end")
@@ -99,15 +580,19 @@ def _dictionary_tab(nb):
         for i in lb.curselection():
             store.remove_term(lb.get(i))
         load()
-    _buttons(f, ("Add", add), ("Remove", remove))
-    return f, load
+    entry.bind("<Return>", lambda e: add())
+    _pills(pg, ui, ("Add", add, "primary"), ("Remove", remove, "danger"))
+    return pg, load
 
 
-def _snippets_tab(nb):
-    f, snips = _tab(nb, "Snippets"), {}
-    lb = tk.Listbox(f, bg=BOX, fg=FG, font=MONO, height=6); lb.pack(fill="x", padx=8, pady=8)
-    name = ttk.Entry(f); name.pack(fill="x", padx=8)
-    body = _text(f, 8); body.pack(fill="both", expand=True, padx=8, pady=4)
+def _snippets_page(content, ui):
+    pg, snips = _page(content, ui, "Snippets", SECTIONS["Snippets"]), {}
+    box, lb = _scrolled(pg.body, lambda p: _listbox(p, ui, 5))
+    box.pack(fill="x")
+    _label(pg.body, ui, "Name").pack(anchor="w", pady=(ui.k(12), ui.k(4)))
+    name = _entry(pg.body, ui); name.pack(fill="x", ipady=ui.k(6))
+    _label(pg.body, ui, "Text").pack(anchor="w", pady=(ui.k(12), ui.k(4)))
+    body = _text(pg.body, ui, 6); body.pack(fill="both", expand=True)
 
     def load():
         snips.clear(); snips.update(store.load_snippets())
@@ -131,25 +616,25 @@ def _snippets_tab(nb):
         if (n := name.get().strip()) in snips:
             del snips[n]; store.save_snippets(snips); new(); load()
     lb.bind("<<ListboxSelect>>", show)
-    _buttons(f, ("New", new), ("Save", save), ("Remove", remove), ("Reload", load))
-    return f, load
+    _pills(pg, ui, ("Save", save, "primary"), ("New", new, "secondary"), ("Remove", remove, "danger"), ("Reload", load, "secondary"))
+    return pg, load
 
 
-def _prompt_tab(nb):
-    f = _tab(nb, "Prompt")
-    box = _text(f, 20); box.pack(fill="both", expand=True, padx=8, pady=8)
-    path = lambda: store.HOME / "prompt.md"
+def _prompt_page(content, ui):
+    pg = _page(content, ui, "Prompt", SECTIONS["Prompt"])
+    box, text = _scrolled(pg.body, lambda p: _text(p, ui, 18))
+    box.pack(fill="both", expand=True)
 
     def load():
-        _set(box, store.load_prompt())
+        _set(text, store.load_prompt())
 
     def save():
-        path().write_text(box.get("1.0", "end").strip() + "\n", encoding="utf-8")
+        (store.HOME / "prompt.md").write_text(text.get("1.0", "end").strip() + "\n", encoding="utf-8")
 
     def reset():
-        _set(box, store.DEFAULT_PROMPT.strip()); save()
-    _buttons(f, ("Save", save), ("Reset to default", reset), ("Reload", load))
-    return f, load
+        _set(text, store.DEFAULT_PROMPT.strip()); save()
+    _pills(pg, ui, ("Save", save, "primary"), ("Reset to default", reset, "secondary"), ("Reload", load, "secondary"))
+    return pg, load
 
 
 def _reload(cfg, status, standalone):
@@ -158,88 +643,225 @@ def _reload(cfg, status, standalone):
     try:
         new = store.load_config()
     except Exception as e:
-        status.set(f"Saved, but config failed to load: {e}")
+        status.set(f"Saved, but config failed to load: {e}", "error")
         return
     cfg.update(new)
     for k in [k for k in cfg if k not in new]:
         cfg.pop(k)
     if standalone:
-        status.set("Saved. Restart murmur to apply.")
+        status.set("Saved. Restart murmur to apply.", "success")
     else:
-        status.set("Saved." + (" Hotkey changes apply after restart." if cfg.get("hotkeys") != old else ""))
+        status.set("Saved." + (" Hotkey changes apply after restart." if cfg.get("hotkeys") != old else ""), "success")
 
 
-def _tones_tab(nb, cfg, status, after_save):
-    f, boxes = _tab(nb, "Tones"), {}
-    ttk.Label(f, text="Saving rewrites config.toml and drops its comments (the Config tab keeps them).").pack(anchor="w", padx=8, pady=4)
-    body = ttk.Frame(f); body.pack(fill="both", expand=True)
+def _tones_page(content, ui, cfg, status, after_save):
+    pg, boxes = _page(content, ui, "Tones", SECTIONS["Tones"]), {}
+    _label(pg.body, ui, "Saving rewrites config.toml and drops its comments (the Config page keeps them).").pack(anchor="w", pady=(0, ui.k(8)))
+    inner = _scroll_frame(pg.body)
 
     def load():
-        for w in body.winfo_children():
+        for w in inner.winfo_children():
             w.destroy()
         boxes.clear()
         for n, text in {**store.DEFAULT_TONES, **cfg.get("tones", {})}.items():
-            ttk.Label(body, text=n).pack(anchor="w", padx=8)
-            boxes[n] = _text(body, 3); boxes[n].pack(fill="x", padx=8, pady=(0, 4)); _set(boxes[n], text)
+            _label(inner, ui, n, "chip", NAME).pack(anchor="w", pady=(ui.k(8), ui.k(4)))
+            boxes[n] = _text(inner, ui, 3, mono=False); boxes[n].pack(fill="x"); _set(boxes[n], text)
 
     def save():
         try:
             store.save_tones({n: b.get("1.0", "end").strip() for n, b in boxes.items()})
         except ValueError as e:
-            status.set(str(e)); return
+            status.set(str(e), "error"); return
         after_save()
-    _buttons(f, ("Save", save), ("Reload", load))
-    return f, load
+    _pills(pg, ui, ("Save", save, "primary"), ("Reload", load, "secondary"))
+    return pg, load
 
 
-def _config_tab(nb, status, after_save):
-    f = _tab(nb, "Config")
-    box = _text(f, 22); box.pack(fill="both", expand=True, padx=8, pady=8)
-    err = ttk.Label(f, foreground="#f48771"); err.pack(anchor="w", padx=8)
+def _scroll_frame(parent):
+    """Frame inside a vertically scrolling canvas (dark scrollbar, mouse wheel)."""
+    sc = tk.Canvas(parent, bg=FILL, highlightthickness=0, bd=0)
+    sb = ttk.Scrollbar(parent, style="Dark.Vertical.TScrollbar", orient="vertical", command=sc.yview)
+    sc.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y", padx=(4, 0)); sc.pack(side="left", fill="both", expand=True)
+    inner = tk.Frame(sc, bg=FILL)
+    win_id = sc.create_window(0, 0, window=inner, anchor="nw")
+    inner.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all")))
+    sc.bind("<Configure>", lambda e: sc.itemconfig(win_id, width=e.width))
+    wheel = lambda e: None if isinstance(e.widget, tk.Text) else sc.yview_scroll(-1 if e.delta > 0 else 1, "units")
+    sc.bind("<Enter>", lambda e: sc.bind_all("<MouseWheel>", wheel)); sc.bind("<Leave>", lambda e: sc.unbind_all("<MouseWheel>"))
+    return inner
+
+
+def _config_page(content, ui, status, after_save, standalone=False):
+    """Form of cards over config.toml (Advanced = the raw editor); load() refills every control from disk over defaults."""
+    pg, fields, k = _page(content, ui, "Config", SECTIONS["Config"]), {}, ui.k
+    form = _scroll_frame(pg.body)
+
+    def card(title, note=None):
+        p = Panel(form, ui, title); p.pack(fill="x", pady=(0, k(12)))
+        if note:
+            _label(p.rows, ui, note, "small", SECONDARY, FIELD).pack(side="bottom", anchor="w", pady=(k(6), 0))
+        return p.rows
+    # rows share a 2-column grid; a card with a note packs the note below the grid frame
+    def grid_card(title, note=None):
+        rows = card(title, note)
+        g = tk.Frame(rows, bg=FIELD); g.pack(side="top", fill="x"); g.columnconfigure(0, minsize=k(210)); g.columnconfigure(1, weight=1)
+        return g
+
+    def row(g, path, label, widget, stretch=False):
+        if path:
+            fields[path] = widget
+        r = g.grid_size()[1]
+        lab = _label(g, ui, label, "body", NAME, FIELD); lab.grid(row=r, column=0, sticky="w", pady=k(5), padx=(0, k(16)))
+        widget.grid(row=r, column=1, sticky="ew" if stretch else "w", pady=k(5))
+        return lab, widget
+    def text(g, path, label):
+        lab, w = row(g, path, label, TextField(g, ui, 30), True)
+        w.grid_configure(ipady=k(5))
+        return lab, w
+
+    def number(g, path, label):
+        lab, w = row(g, path, label, TextField(g, ui, 8, digits=True))
+        w.grid_configure(ipady=k(5))
+        return lab, w
+    toggle = lambda g, path, label: row(g, path, label, Toggle(g, ui))
+
+    g = grid_card("Hotkeys", "Hotkey changes apply after restart." + (
+        " Recording a hotkey while murmur is running will trigger it \u2014 pause murmur from the tray first." if standalone else ""))
+    for key, label in (("dictate", "Dictate (hold)"), ("command", "Command (hold)"), ("fix_last", "Fix last"), ("learn_word", "Learn word")):
+        row(g, f"hotkeys.{key}", label, HotkeyField(g, ui, status))
+    g = grid_card("Dictation")
+    toggle(g, "llm.live_clean", "Live cleanup")
+    row(g, "audio.device", "Microphone", MicField(g, ui, status))
+    row(g, "output.method", "Output method", Select(g, ui, ["paste", "type"]))
+    toggle(g, "context.enabled", "Read text around the cursor")
+    number(g, "context.before_chars", "Context before (chars)"); number(g, "context.after_chars", "Context after (chars)")
+    toggle(g, "ui.startup_toast", "Startup notification")
+    g = grid_card("Speech model")
+    text(g, "stt.model", "Model"); row(g, "stt.quantization", "Quantization", Select(g, ui, ["int8", "none"]))
+    g = grid_card("Cleanup model")
+    provider = Select(g, ui, ["openai", "anthropic"]); row(g, "llm.provider", "Provider", provider)
+    text(g, "llm.url", "URL"); text(g, "llm.model", "Model"); number(g, "llm.timeout", "Timeout (s)")
+    key_row = text(g, "llm.api_key_env", "API key env var")
+    lms_rows = text(g, "llm.lms", "LM Studio CLI") + text(g, "llm.lms_load", "LM Studio load command")
+
+    def show_provider(*_):
+        for ws, on in ((key_row, provider.get() == "anthropic"), (lms_rows, provider.get() == "openai")):
+            for w in ws:
+                w.grid() if on else w.grid_remove()
+    provider.var.trace_add("write", show_provider)
+    rows = card("Apps & tones")
+    _label(rows, ui, "Process name to tone", "small", SECONDARY, FIELD).pack(anchor="w", pady=(0, k(4)))
+    fields["apps"] = AppsTable(rows, ui); fields["apps"].pack(fill="x")
+    _label(rows, ui, "Never copy selection in (command mode)", "small", SECONDARY, FIELD).pack(anchor="w", pady=(k(14), k(4)))
+    fields["no_copy"] = ChipList(rows, ui); fields["no_copy"].pack(fill="x")
+
+    adv = Panel(form, ui, "Advanced"); adv.pack(fill="x", pady=(0, k(12)))
+    _label(adv.rows, ui, "The raw config.toml. Saving here keeps comments; the form above drops them.", "small", SECONDARY, FIELD).pack(anchor="w")
+    raw = tk.Frame(adv.rows, bg=FIELD)
+    box, edit = _scrolled(raw, lambda p: _text(p, ui, 14)); box.pack(fill="x", pady=(k(8), 0))
+    err = _label(raw, ui, "", "small", ERROR, FIELD); err.pack(anchor="w", pady=(k(6), 0))
+    btns = tk.Frame(raw, bg=FIELD); btns.pack(anchor="w", pady=(k(8), 0))
+    shown = [False]
+
+    def toggle_raw():
+        shown[0] = not shown[0]
+        (raw.pack if shown[0] else raw.pack_forget)(fill="x")
+        arrow.config(text="Hide raw editor" if shown[0] else "Show raw editor")
+    arrow = tk.Label(adv.rows, text="Show raw editor", bg=FIELD, fg=ACCENT, font=ui.fonts["chip"], cursor="hand2", anchor="w")
+    arrow.pack(anchor="w", pady=(k(6), 0)); arrow.bind("<Button-1>", lambda e: toggle_raw())
 
     def load():
-        _set(box, (store.HOME / "config.toml").read_text(encoding="utf-8")); err.config(text="")
+        cfg = store.merged_config()
+        for path, w in fields.items():
+            if path == "apps":
+                tones = list(cfg.get("tones", {})) or list(store.DEFAULT_TONES)
+                w.set({a: t for a, t in cfg.get("apps", {}).items() if isinstance(t, str)}, tones)
+            elif path == "no_copy":
+                w.set(cfg.get("apps", {}).get("no_copy", store.NO_COPY))
+            else:
+                sec, key = path.split(".")
+                w.set(cfg.get(sec, {}).get(key, ""))
+        _set(edit, (store.HOME / "config.toml").read_text(encoding="utf-8")); err.config(text="")
+        provider.var.set(provider.get())  # fire the show/hide trace
 
-    def save():
-        text = box.get("1.0", "end")
+    def save_form():
         try:
-            tomllib.loads(text)
-        except tomllib.TOMLDecodeError as e:
-            err.config(text=f"Not saved: {e}"); return
-        err.config(text="")
-        (store.HOME / "config.toml").write_text(text, encoding="utf-8")
+            store.save_config(store.form_to_cfg({p: w.get() for p, w in fields.items()}, store.load_config()))
+        except (ValueError, TypeError) as e:
+            status.set(f"Not saved: {e}", "error"); return
         after_save()
-    _buttons(f, ("Save", save), ("Reload", load))
-    return f, load
+
+    def save_raw():
+        raw_text = edit.get("1.0", "end")
+        try:
+            tomllib.loads(raw_text)
+        except tomllib.TOMLDecodeError as e:
+            err.config(text=f"Not saved: {e}"); status.set("Not saved: config.toml has a syntax error", "error"); return
+        (store.HOME / "config.toml").write_text(raw_text, encoding="utf-8")
+        after_save()
+    Pill(btns, ui, "Save raw", save_raw, "primary").pack(side="left", padx=(0, k(8))); Pill(btns, ui, "Reload", load).pack(side="left")
+    _pills(pg, ui, ("Save", save_form, "primary"), ("Reload", load, "secondary"))
+    _label(pg.bar, ui, "Saving the form rewrites config.toml and drops its comments.").pack(side="left", padx=(k(4), 0))
+    return pg, load
 
 
-def open_settings(root, cfg, fix=None, standalone=False):
+
+def open_settings(root, cfg, fix=None, standalone=False, start="History"):
     """Open the window; `cfg` is the live config dict (updated in place on save); fix(root, row) opens the row editor."""
-    top = tk.Toplevel(root); top.title("murmur settings"); top.configure(bg=BG); top.geometry("820x560")
-    _style(top)
-    status, editors = tk.StringVar(), []
+    s = win.dpi_scale()
+    top = tk.Toplevel(root); top.title("murmur"); top.configure(bg=FILL); top.geometry(f"{round(880 * s)}x{round(600 * s)}")
+    ui = SimpleNamespace(s=s, k=lambda v: round(v * s))
+    ui_f, semi_f, mono_f = pick_fonts(set(tkfont.families()))
+    px = lambda n: -round(n * s)
+    ui.fonts = {"body": tkfont.Font(family=ui_f, size=px(13)), "small": tkfont.Font(family=ui_f, size=px(12.5)),
+                "label": tkfont.Font(family=ui_f, size=px(11)), "title": tkfont.Font(family=semi_f, size=px(20)),
+                "chip": tkfont.Font(family=semi_f, size=px(13)), "pill": tkfont.Font(family=semi_f, size=px(13)),
+                "tile": tkfont.Font(family=semi_f, size=px(18)), "section": tkfont.Font(family=semi_f, size=px(14)), "mono": tkfont.Font(family=mono_f, size=px(12))}
+    _style(top, ui)
+    try:
+        root.iconbitmap(default=str(icon_path()))  # also what the taskbar shows
+    except tk.TclError:
+        pass
+    win.style_window(top)
+    side = tk.Frame(top, bg=SIDEBAR, width=ui.k(200)); side.pack(side="left", fill="y"); side.pack_propagate(False)
+    content = tk.Frame(top, bg=FILL); content.pack(side="left", fill="both", expand=True)
+    status = Status(content, ui); status.pack(side="bottom", fill="x", padx=ui.k(20), pady=(0, ui.k(14)))
+    editors = []
 
     def after_save():
         _reload(cfg, status, standalone)
         for load in editors:
             load()  # editors that mirror config.toml re-read it so a later save can't clobber this one
-    nb = ttk.Notebook(top); nb.pack(fill="both", expand=True)
-    live = {}
-    tabs = [(_history_tab(nb, root, fix), True), (_dictionary_tab(nb), True), (_snippets_tab(nb), False),
-            (_prompt_tab(nb), False), (_tones_tab(nb, cfg, status, after_save), False),
-            (_config_tab(nb, status, after_save), False)]
-    for (f, load), refresh in tabs:
+
+    pages = {"History": (_history_page(content, ui, root, fix), True), "Dictionary": (_dictionary_page(content, ui), True),
+             "Snippets": (_snippets_page(content, ui), False), "Prompt": (_prompt_page(content, ui), False)}
+    pages["Tones"] = (_tones_page(content, ui, cfg, status, after_save), False)
+    pages["Config"] = (_config_page(content, ui, status, after_save, standalone), False)
+    for (pg, load), _ in pages.values():
         load()
+    editors += [pages["Tones"][0][1], pages["Config"][0][1]]
+    tk.Label(side, text="murmur", bg=SIDEBAR, fg=ACCENT, font=ui.fonts["title"], anchor="w").pack(anchor="w", padx=ui.k(20), pady=(ui.k(20), ui.k(14)))
+    chips, cur = {}, [None]
+
+    def show(name):
+        if cur[0]:
+            pages[cur[0]][0][0].frame.pack_forget(); chips[cur[0]].set_active(False)
+        cur[0] = name
+        (pg, load), refresh = pages[name]
+        pg.frame.pack(fill="both", expand=True)
+        chips[name].set_active(True)
         if refresh:
-            live[str(f)] = load  # only list tabs re-read on switch; editor tabs keep unsaved text
-    editors += [tabs[4][0][1], tabs[5][0][1]]
-    nb.bind("<<NotebookTabChanged>>", lambda e: live.get(nb.select(), lambda: None)())
-    ttk.Label(top, textvariable=status).pack(side="bottom", anchor="w", padx=8, pady=4, before=nb)
+            load()  # list pages re-read on show; editor pages keep unsaved text
+    for name in SECTIONS:
+        chips[name] = Chip(side, ui, name, lambda n=name: show(n))
+        chips[name].pack(fill="x", padx=ui.k(12), pady=ui.k(2))
+    show(start if start in SECTIONS else "History")
     return top
 
 
-def run_standalone(cfg, fix=None):
+def run_standalone(cfg, fix=None, start="History"):
     root = tk.Tk(); root.withdraw()
-    top = open_settings(root, cfg, fix, standalone=True)
+    top = open_settings(root, cfg, fix, standalone=True, start=start)
     top.bind("<Destroy>", lambda e: root.quit() if e.widget is top else None)
     root.mainloop()

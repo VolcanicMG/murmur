@@ -11,19 +11,25 @@ def gather(cfg):
     return {"app": app, "title": title, "tone": brain.tone_for(app, cfg)}
 
 
-def read_field(cfg):
+def read_field(cfg, on_rect=None, text=True):
     """Text around the caret in the focused control: {before, after, selected} or {} on any failure.
 
     Uses UI Automation (TextPattern, then ValuePattern with the caret treated as end-of-field).
-    Run it in a daemon thread with a short join: UIA can hang on some apps.
+    Run it in a daemon thread with a short join: UIA can hang on some apps. on_rect((l, t, r, b)) gets the
+    control's screen rect as soon as it is known (before the slower text read) so the card can anchor early.
+    text=False reads the rect only (terminal apps: scrollback must not reach prompts).
     """
     c = cfg.get("context", {})
-    if not c.get("enabled", True):
+    if not on_rect and not (text and c.get("enabled", True)):
         return {}
     try:
         import uiautomation as auto
         with auto.UIAutomationInitializerInThread():
             ctl = auto.GetFocusedControl()
+            _emit_rect(ctl, on_rect)
+            if not (text and c.get("enabled", True)):
+                del ctl
+                return {}
             out = _from_text_pattern(auto, ctl) or _from_value_pattern(auto, ctl)
             del ctl  # no COM object may outlive the initializer
             n, m = c.get("before_chars", 600), c.get("after_chars", 200)
@@ -31,6 +37,17 @@ def read_field(cfg):
     except Exception as e:
         log.debug("read_field failed: %s", e)
         return {}
+
+
+def _emit_rect(ctl, on_rect):
+    if not on_rect:
+        return
+    try:
+        r = ctl.BoundingRectangle
+        if r.right > r.left and r.bottom > r.top:
+            on_rect((r.left, r.top, r.right, r.bottom))
+    except Exception as e:
+        log.debug("bounding rect failed: %s", e)
 
 
 def _from_text_pattern(auto, ctl):

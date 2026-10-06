@@ -7,7 +7,7 @@ a = Analysis(
     ["packaging/entry.py"],
     pathex=[SPECPATH],
     binaries=[],
-    datas=collect_data_files("onnx_asr") + copy_metadata("onnx-asr"),  # model preprocessors + dist-info (onnx_asr reads its own version)
+    datas=collect_data_files("onnx_asr") + copy_metadata("onnx-asr") + [(os.path.join(SPECPATH, "packaging", f), "packaging") for f in ("murmur.ico", "icon.png")],  # model preprocessors + dist-info (onnx_asr reads its own version)
     hiddenimports=collect_submodules("murmur") + collect_submodules("onnx_asr") + ["pystray._win32", "comtypes.stream"],
     hookspath=[],
     runtime_hooks=[],

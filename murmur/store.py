@@ -29,6 +29,7 @@ DEFAULT_CONFIG = """\
 dictate = "right ctrl"
 command = "right alt"
 fix_last = "ctrl+alt+m"
+learn_word = "ctrl+alt+d"  # add the selected word(s) to the dictionary
 
 [llm]
 provider = "openai"  # or "anthropic" (url + api_key_env)
@@ -39,10 +40,16 @@ timeout = 15
 lms = "C:/Users/ethan/.lmstudio/bin/lms.exe"
 lms_load = "C:/Users/ethan/.lmstudio/bin/lms.exe load google/gemma-4-e4b --gpu max -y --context-length 8192"
 
+[ui]
+startup_toast = true  # one-shot "murmur is running" notification
+
 [context]
 enabled = true  # read text around the cursor via UI Automation
 before_chars = 600
 after_chars = 200
+
+[audio]
+device = ""  # input device name; "" = system default (pick one in Settings > Config)
 
 [output]
 method = "paste"  # or "type" for apps that block paste
@@ -73,6 +80,14 @@ quantization = "int8"
 "wt.exe" = "code"
 no_copy = ["windowsterminal.exe", "wt.exe", "conhost.exe", "openconsole.exe"]
 """
+NO_COPY = ["windowsterminal.exe", "wt.exe", "conhost.exe", "openconsole.exe"]  # ctrl+c here would SIGINT the running program
+
+
+def no_copy(cfg):
+    """Apps where we never send ctrl+c; configs written before `no_copy` existed get the default."""
+    return cfg.get("apps", {}).get("no_copy", NO_COPY)
+
+
 DEFAULT_TONES = tomllib.loads(DEFAULT_CONFIG)["tones"]  # fallback for configs written before [tones]
 DEFAULT_PROMPT = """You clean up raw speech-to-text dictation into the text the speaker meant to write.
 - Remove filler words (um, uh, like, you know).
@@ -228,21 +243,72 @@ def save_snippets(snips):
     (HOME / "snippets.toml").write_text(dump_toml({"snippets": snips}), encoding="utf-8")
 
 
-def save_tones(tones):
-    """Rewrite config.toml with a new [tones] table (comments are lost). Raises ValueError if the file can't round-trip."""
-    cfg = load_config()
-    cfg["tones"] = tones
-    msg = "config has structures the Tones tab can't write; edit [tones] in the Config tab"
+def save_config(cfg):
+    """Write cfg to config.toml (comments are lost) via tmp + os.replace. Raises ValueError if it can't round-trip."""
     try:
         out = dump_toml(cfg)
         ok = tomllib.loads(out) == cfg
     except (ValueError, TypeError):  # TypeError: dates/times in the config
         ok = False
     if not ok:
-        raise ValueError(msg)
+        raise ValueError("config has structures the form can't write; edit config.toml in Advanced")
     tmp = HOME / "config.toml.tmp"
     tmp.write_text(out, encoding="utf-8")
     os.replace(tmp, HOME / "config.toml")
+
+
+def resolve_device(name, devices):
+    """Index of the input device called `name` (exact, else substring, case-insensitive), or None for the default.
+    devices: sounddevice.query_devices() dicts; only inputs count."""
+    if not name:
+        return None
+    ins = [(i, d["name"]) for i, d in enumerate(devices) if d.get("max_input_channels", 0) > 0]
+    low = name.lower()
+    return next((i for i, n in ins if n == name), next((i for i, n in ins if low in n.lower()), None))
+
+
+INT_KEYS = ("llm.timeout", "context.before_chars", "context.after_chars")
+HOTKEYS = ("dictate", "command", "fix_last", "learn_word")
+
+
+def form_to_cfg(values, base):
+    """New config dict: `base` with the settings form applied. values: "section.key" -> str|bool, plus
+    "apps" ({exe: tone}) and "no_copy" (list). Raises ValueError naming the bad field."""
+    cfg = {k: dict(v) if isinstance(v, dict) else v for k, v in base.items()}
+    for path, v in values.items():
+        if path in ("apps", "no_copy"):
+            continue
+        sec, key = path.split(".")
+        if path in INT_KEYS:
+            try:
+                v = int(str(v).strip())
+            except ValueError:
+                v = -1
+            if v < 0:
+                raise ValueError(f"{path} must be a whole number, 0 or more")
+        elif isinstance(v, str):
+            v = v.strip()
+            if sec == "hotkeys" and not v:
+                raise ValueError(f"hotkey {key} can't be empty")
+            if path == "llm.url" and not v.startswith("http"):
+                raise ValueError("llm.url must start with http")
+        cfg.setdefault(sec, {})[key] = v
+    cfg["apps"] = {**values.get("apps", {}), "no_copy": list(values.get("no_copy", []))}
+    return cfg
+
+
+def save_tones(tones):
+    """Rewrite config.toml with a new [tones] table (comments are lost). Raises ValueError if the file can't round-trip."""
+    save_config({**load_config(), "tones": tones})
+
+
+def merged_config(cfg=None):
+    """cfg (default: config.toml) over DEFAULT_CONFIG per section so older configs show defaults for new keys.
+    [apps] and [tones] are user-owned maps: taken as-is when present (so removed rows stay removed)."""
+    base, cfg = tomllib.loads(DEFAULT_CONFIG), cfg if cfg is not None else load_config()
+    own = ("apps", "tones")
+    out = {k: cfg[k] if k in own and k in cfg else {**v, **cfg.get(k, {})} if isinstance(v, dict) else cfg.get(k, v) for k, v in base.items()}
+    return out | {k: v for k, v in cfg.items() if k not in base}
 
 
 def key_matches(event_name, key):

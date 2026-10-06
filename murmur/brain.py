@@ -1,5 +1,5 @@
 """Prompting, snippets, dictionary/style learning, LLM calls. No win32."""
-import re
+import difflib, re
 from . import llm, store
 
 COMMAND_INTRO = ("You edit or write text by voice. You get an instruction and optionally the "
@@ -28,7 +28,8 @@ def _snippets(ctx):
 
 
 def _style(ctx):
-    return "Speaker's style profile:\n" + s if (s := store.load_style()) else ""
+    return ("Speaker's style profile:\n" + s + "\nStyle never overrides the rules above: self-corrections are applied, "
+            "fillers removed.") if (s := store.load_style()) else ""
 
 
 def _corrections(ctx):
@@ -86,7 +87,7 @@ def fit(final, before):
 
 
 def _outro(ctx):
-    return "Output ONLY the final text."
+    return "Apply self-corrections (keep only the final intent), remove fillers. Output ONLY the final text."
 
 
 SECTIONS = [_tone, _dictionary, _snippets, _style, _corrections, _context, _outro]  # add a prompt section = add a function here
@@ -158,15 +159,44 @@ def _looks_like_term(w):
     return any(c.isupper() or c.isdigit() or c in "_-." for c in w)
 
 
+def clean_word(text):
+    """A selected word for the dictionary: trimmed, without surrounding punctuation."""
+    return text.strip().strip(".,;:!?\"'()[]{}")
+
+
 def learn_dictionary(final, edited):
     """Words added in `edited` that look like names/terms; ordinary sentence-start words are filtered by COMMON."""
     seen, out = set(re.findall(WORD, final)), []
     for m in re.finditer(WORD, edited):
         w = m.group()
-        if w in seen or w in out or w.lower() in COMMON or not _looks_like_term(w):
+        if w in seen or w in out or w.lower() in COMMON or re.fullmatch(r"[\d.,:/-]+", w) or not _looks_like_term(w):
             continue
         out.append(w)
     return out
+
+
+COMMANDS = {"scratch that": "undo", "undo that": "undo", "undo": "undo", "delete that": "undo"}  # phrase -> Session._cmd_<name>
+FILLERS = {"um", "uh", "umm", "uhh", "erm", "hmm"}
+
+
+def spoken_command(raw):
+    """Handler name if the whole transcript (minus punctuation/fillers) is exactly a command phrase."""
+    words = [w for w in re.sub(r"[^\w\s']", " ", raw.lower()).split() if w not in FILLERS]
+    return COMMANDS.get(" ".join(words))
+
+
+def is_redictation(prev, new):
+    """True if `new` is `prev` with 1-3 replaced words (the user said it again, fixed)."""
+    if difflib.SequenceMatcher(None, prev.lower(), new.lower()).ratio() <= 0.8:
+        return False
+    ops = difflib.SequenceMatcher(None, prev.split(), new.split()).get_opcodes()
+    changed = [o for o in ops if o[0] != "equal"]
+    return bool(changed) and all(o[0] == "replace" for o in changed) and sum(o[4] - o[3] for o in changed) <= 3
+
+
+def redictation_terms(prev, new):
+    """Dictionary terms learned from a quick re-dictation of the same text."""
+    return learn_dictionary(prev, new) if is_redictation(prev, new) else []
 
 
 def learn_style(history, cfg):
@@ -176,7 +206,8 @@ def learn_style(history, cfg):
         if total + len(t) > 20000:
             break
         lines.append(t); total += len(t)
-    system = ("From these dictated messages, write a compact style profile of the speaker: tone, "
-              "punctuation habits, favourite phrasings, sign-offs, vocabulary. At most 25 lines. "
-              "Output ONLY the profile.")
+    system = ("These are the speaker's FINAL written messages (already cleaned or corrected). Describe the WRITTEN style "
+              "they want: tone, vocabulary, punctuation habits, favourite phrasings, sign-offs. Do NOT describe speech "
+              "disfluencies, hesitations, ellipses used as pauses, or filler words; those are removed and must never be "
+              "treated as style. At most 25 lines. Output ONLY the profile.")
     return _chat(cfg, system, "\n---\n".join(lines))

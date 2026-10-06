@@ -43,6 +43,39 @@ class T(unittest.TestCase):
         self.assertEqual(brain.tidy("'cache' is fine, use 'redis'"), "'cache' is fine, use 'redis'")
         self.assertEqual(brain.tidy("\u201cHi there\u201d"), "Hi there")
 
+    def test_spoken_command(self):
+        for ok in ("scratch that", "Scratch that.", "Um, scratch that!", "undo", "delete that", "uh undo that"):
+            self.assertEqual(brain.spoken_command(ok), "undo", ok)
+        for no in ("scratch that please", "please undo", "new paragraph", "scratch", ""):
+            self.assertIsNone(brain.spoken_command(no), no)
+
+    def test_redictation(self):
+        self.assertEqual(brain.redictation_terms("talk to john", "talk to Jon"), ["Jon"])
+        self.assertEqual(brain.redictation_terms("talk to john", "send the invoice tomorrow"), [])
+        self.assertEqual(brain.redictation_terms("we should ship this today", "They could deploy Podstead tomorrow"), [])
+        self.assertEqual(brain.redictation_terms("Thanks, sounds good.", "Thanks, sounds good!"), [])
+        self.assertEqual(brain.redictation_terms("same words here", "same words here"), [])
+        self.assertTrue(brain.is_redictation("talk to john", "talk to Jon"))
+        self.assertFalse(brain.is_redictation("talk to john", "talk to john and then Mary"))
+
+    def test_style_cannot_override_rules(self):
+        (store.HOME / "style.md").write_text("uses ellipses...", encoding="utf-8")
+        p = brain.build_system_prompt({"tone": "neutral"})
+        self.assertIn("uses ellipses...\nStyle never overrides the rules above: self-corrections are applied, fillers removed.", p)
+        self.assertTrue(p.endswith("Output ONLY the final text."))
+        self.assertIn("self-corrections", p.splitlines()[-1])
+
+    def test_numbers_and_clean_word(self):
+        self.assertEqual(brain.learn_dictionary("is 5 ok", "is 6 ok"), [])
+        self.assertEqual(brain.learn_dictionary("at 1.5 ok", "at 2,5 or 10:30 or 3/4 ok"), [])
+        self.assertEqual(brain.clean_word('  "Podstead,"! '), "Podstead")
+        self.assertEqual(brain.clean_word("(foo.bar)"), "foo.bar")
+
+    def test_no_copy_default(self):
+        self.assertIn("windowsterminal.exe", store.no_copy({"apps": {}}))
+        self.assertIn("wt.exe", store.no_copy({}))
+        self.assertEqual(store.no_copy({"apps": {"no_copy": ["x.exe"]}}), ["x.exe"])
+
     def test_history_robust(self):
         store.append_history({"ts": "1", "final": "a"})
         store.append_history({"ts": "2", "final": "b"})
