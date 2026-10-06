@@ -37,6 +37,9 @@ def selftest():
     t = time.time(); raw = stt.recognize(audio); print(f"raw ({time.time() - t:.2f}s): {raw}")
     ctx = {"cfg": cfg, "tone": "casual", "terms": ["Podstead"]}
     t = time.time(); c = brain.clean(raw, ctx); print(f"cleaned ({time.time() - t:.2f}s): {c}")
+    from . import context
+    f = context.read_field(cfg)
+    print("context:", {k: len(v) for k, v in f.items()} or "none")
     print("snippets:", brain.apply_snippets("Thanks! {{snippet:SIG}}", store.load_snippets()))
     print("shortcut:", brain.snippet_only("Insert sig.", store.load_snippets()))
     sys.stdout.flush(); os._exit(0)  # skip onnxruntime teardown
@@ -54,15 +57,22 @@ def learn(cfg):
 def main():
     ap = argparse.ArgumentParser(prog="murmur", description="Local voice dictation")
     ap.add_argument("cmd", nargs="?", choices=["learn"], help="learn: rebuild style.md from history")
+    ap.add_argument("--settings", action="store_true", help="open the settings window only")
     ap.add_argument("--selftest", action="store_true", help="transcribe+clean test.wav, no hotkeys")
     a = ap.parse_args()
     store.ensure()
     if a.selftest:
         return selftest()
+    if a.settings:
+        from . import settings
+        from .app import fix_last
+        return settings.run_standalone(store.load_config(), fix_last)
     setup_logging()
     cfg = store.load_config()
     if a.cmd == "learn":
         return learn(cfg)
+    if cfg.get("context", {}).get("enabled", True) and cfg["llm"].get("provider", "openai") != "openai":
+        log.warning("[context] enabled with a remote LLM provider: text around your cursor is sent to it")
     stt.load_model(cfg)
     start_llm(cfg)
     from .app import tray_app

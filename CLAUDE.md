@@ -22,17 +22,20 @@ cmd.exe can't cd to UNC; PowerShell can.
 ## Gotchas
 - `keyboard` matches hooks by scan code: always filter on the sided event name (`store.key_matches`).
 - Overlay must never deiconify/withdraw after startup (steals focus); it toggles alpha and has NOACTIVATE|TOOLWINDOW|TRANSPARENT styles.
+- UIA read runs in a daemon thread with a 0.4 s join — never call UIA on the Tk thread or the hotkey thread.
+- The UIA ValuePattern fallback treats the caret as end-of-field.
 - Command mode copies the selection on key release (not press) and skips `[apps] no_copy` apps.
 
 ## Architecture & extension points
 - `__main__.py`: argparse, logging, LM Studio startup, selftest, learn.
 - `app.py`: tray wiring, hotkey press/release, fix-last editor, shared state `S`.
 - `session.py`: one recording (audio, live clean, finish, insert). `Session` per press.
-- `context.py`: per-recording context dict (app, title, tone).
+- `context.py`: per-recording context: `gather` (app, title, tone) and `read_field` (UIA text before/after caret, selection).
 - `brain.py`: prompt sections, snippets, dictionary/style learning, output tidy. No win32.
 - `llm.py`: provider request shaping only (openai-compatible, anthropic).
 - `stt.py`: Parakeet load/recognize.
-- `store.py`: `~/.murmur` files, defaults, history.
+- `store.py`: `~/.murmur` files, defaults, history, stats, minimal TOML writer (`dump_toml`).
+- `settings.py`: tkinter settings/history window (Tk main thread only; each tab builder returns `(frame, load)`).
 - `win.py`: foreground app, clipboard/paste/type, overlay.
 
-To add: an STT backend -> `stt.py` `load_model`/`recognize` contract; an LLM provider -> `llm.py` `chat()`; a tone -> `[tones]` in config (+ `[apps]`); a prompt section -> a function in `brain.SECTIONS`; a context source -> `context.gather`; an output method -> `win.insert`; a hotkey trigger mode -> `app.py` `press`/`release`; a spoken command -> `session.COMMANDS` (phase 2c).
+To add: a settings tab -> a `_x_tab` builder in `settings.py` listed in `open_settings`; an STT backend -> `stt.py` `load_model`/`recognize` contract; an LLM provider -> `llm.py` `chat()`; a tone -> `[tones]` in config (+ `[apps]`); a prompt section -> a function in `brain.SECTIONS`; a context source -> `context.gather`; an output method -> `win.insert`; a hotkey trigger mode -> `app.py` `press`/`release`; a spoken command -> `session.COMMANDS` (phase 2c).

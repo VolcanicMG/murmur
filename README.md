@@ -10,7 +10,7 @@ python -m venv %USERPROFILE%\.murmur\venv
 Needs LM Studio installed with `google/gemma-4-e4b` downloaded; murmur starts the server and loads the model via `lms` if they are not already up.
 
 ## Run
-`run.cmd` (tray app), `run.cmd --selftest`, `run.cmd learn` — from Windows, e.g. `\\wsl.localhost\Ubuntu-24.04\home\ethan\repos\murmur\run.cmd`. (`run.ps1` directly is blocked by the execution policy because the WSL path counts as remote; `run.cmd` bypasses it for that one file.)
+`run.cmd` (tray app, runs on pythonw so no console window; any args use python.exe for stdout), `run.cmd --selftest`, `run.cmd learn` — from Windows, e.g. `\\wsl.localhost\Ubuntu-24.04\home\ethan\repos\murmur\run.cmd`. (`run.ps1` directly is blocked by the execution policy because the WSL path counts as remote; `run.cmd` bypasses it for that one file.)
 
 ## Hotkeys
 - Hold `right ctrl`: dictate. Release to paste.
@@ -25,4 +25,6 @@ Needs LM Studio installed with `google/gemma-4-e4b` downloaded; murmur starts th
 `learn` summarizes recent history into `style.md`, which is fed into the cleanup prompt.
 
 ## Customising
-Everything lives in `~/.murmur/`: `config.toml` (hotkeys, LLM provider, `[tones]`, `[apps]`, `[output]`), `prompt.md` (cleanup rules), `dictionary.txt`, `snippets.toml`, `style.md`.
+Tray menu > Settings… (or `.\run.ps1 --settings`) edits all of this in a window: history (copy/fix/delete, time-saved stats), dictionary, snippets, prompt, tones and raw config. Config/tone saves apply live except hotkeys (restart).
+
+Everything lives in `~/.murmur/`: `config.toml` (hotkeys, LLM provider, `[tones]`, `[apps]`, `[output]`, `[context]` for cursor-aware dictation; skipped for `no_copy` apps, and a warning is logged if the LLM provider is remote since field text would leave the machine), `prompt.md` (cleanup rules), `dictionary.txt`, `snippets.toml`, `style.md`.

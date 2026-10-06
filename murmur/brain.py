@@ -37,15 +37,64 @@ def _corrections(ctx):
             "\n".join(f"{h['final'][:300]} → {h['corrected'][:300]}" for h in pairs)) if pairs else ""
 
 
+def _context(ctx):
+    """Existing text around the cursor (dictate mode only)."""
+    if ctx.get("mode") == "command":
+        return ""
+    c = (ctx.get("cfg") or {}).get("context", {})
+    before, after = ctx.get("before", "")[-c.get("before_chars", 600):], ctx.get("after", "")[:c.get("after_chars", 200)]
+    parts = []
+    if before or after:
+        mid = before.rstrip()[-1:] not in ".!?" and not before.endswith("\n")
+        case = ("You are continuing mid-sentence: start lowercase, no leading capital or punctuation." if mid else
+                "The previous sentence is complete: start a new sentence with a capital.")
+        parts.append("The cursor is inside existing text. "
+                     + (f"Text BEFORE the cursor (continue from it; do not repeat it): «{before}» " if before else "")
+                     + (f"Text AFTER: «{after}» " if after else "")
+                     + (case + " " if before else "")
+                     + "Match the surrounding list/format style; spell names the way they appear in the surrounding text.")
+    if ctx.get("selected"):
+        parts.append(f"Text is selected and this dictation will REPLACE it: «{ctx['selected'][:300]}»")
+    return "\n".join(parts)
+
+
+def _drop_repeat(final, before):
+    """Strip a leading re-emission of the tail of `before` (>= 8 chars, case-insensitive)."""
+    tail = before.rstrip()
+    for k in range(min(len(tail), len(final)), 7, -1):
+        if tail[-k:].lower() == final[:k].lower():
+            return final[k:].lstrip()
+    return final
+
+
+def fit(final, before):
+    """Deterministic joint with the text before the cursor: drop repeats, fix capital and spacing."""
+    if not before or not final:
+        return final
+    final = _drop_repeat(final, before)
+    if final and before.rstrip()[-1:] in tuple(".!?"):
+        final = final[0].upper() + final[1:]
+    if not final or before.endswith("\n"):
+        return final
+    b = before[-1]
+    if b == " ":
+        return final.lstrip(" ")
+    closing = b in "\"'" and before[-2:-1] not in (" ", "", "\n")  # an opening quote gets no space
+    if (b.isalnum() or b in "_)]}\u201d\u2019.,;:!?" or closing) and (final[0].isalnum() or final[0] == "_"):
+        return " " + final
+    return final
+
+
 def _outro(ctx):
     return "Output ONLY the final text."
 
 
-SECTIONS = [_tone, _dictionary, _snippets, _style, _corrections, _outro]  # add a prompt section = add a function here
+SECTIONS = [_tone, _dictionary, _snippets, _style, _corrections, _context, _outro]  # add a prompt section = add a function here
 
 
 def build_system_prompt(ctx, mode="dictate"):
     """ctx: {tone, cfg?, terms?: extra dictionary terms}. mode 'command' = rewrite/generate instead of clean."""
+    ctx = {**ctx, "mode": mode}
     head = COMMAND_INTRO if mode == "command" else store.load_prompt()
     return "\n\n".join(p for p in [head] + [f(ctx) for f in SECTIONS] if p)
 

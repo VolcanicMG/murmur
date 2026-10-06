@@ -3,7 +3,7 @@ import logging, os, threading
 from types import SimpleNamespace
 import keyboard, pystray
 from PIL import Image, ImageDraw
-from . import brain, store, win
+from . import brain, settings, store, win
 from .session import Session
 
 log = logging.getLogger("murmur")
@@ -42,21 +42,24 @@ def release(mode):
         S["held"] = False
 
 
-def fix_last(ov):
-    """Editor for the last dictation; saving teaches the dictionary and records the correction."""
+def fix_last(root, row):
+    """Editor for one history row; saving teaches the dictionary and records the correction."""
     import tkinter as tk
-    hist = store.read_history(1)
-    if not hist:
-        return
-    final, ts = hist[-1]["final"], hist[-1]["ts"]  # ts pins the row even if a newer dictation lands
-    top = tk.Toplevel(ov.root); top.title("murmur: fix last"); top.attributes("-topmost", True)
+    final, ts = row["final"], row["ts"]  # ts pins the row even if a newer dictation lands
+    top = tk.Toplevel(root); top.title("murmur: fix"); top.attributes("-topmost", True)
     box = tk.Text(top, width=70, height=10, wrap="word"); box.insert("1.0", final); box.pack(padx=8, pady=8)
 
     def save():
         edited = box.get("1.0", "end").strip()
         new = store.add_terms(brain.learn_dictionary(final, edited))
-        store.correct_last(ts, edited); log.info("learned: %s", new); top.destroy()
+        store.correct_last(ts, final, edited); log.info("learned: %s", new); top.destroy()
     tk.Button(top, text="Save", command=save).pack(pady=(0, 8))
+
+
+def fix_newest(root):
+    hist = store.read_history(1)
+    if hist:
+        fix_last(root, hist[-1])
 
 
 def tray_app(cfg, learn):
@@ -70,11 +73,12 @@ def tray_app(cfg, learn):
     for mode, key in keys.items():
         keyboard.on_press_key(key, lambda e, m=mode, k=key: store.key_matches(e.name, k) and press(m, cfg, ov, mark))
         keyboard.on_release_key(key, lambda e, m=mode, k=key: store.key_matches(e.name, k) and release(m))
-    keyboard.add_hotkey(hk["fix_last"], lambda: ov.post(lambda: fix_last(ov)))
+    keyboard.add_hotkey(hk["fix_last"], lambda: ov.post(lambda: fix_newest(ov.root)))
 
     def toggle(i, it):
         S["paused"] = not S["paused"]
     menu = pystray.Menu(
+        pystray.MenuItem("Settings\u2026", lambda i, it: ov.post(lambda: settings.open_settings(ov.root, cfg, fix_last))),
         pystray.MenuItem("Open config folder", lambda i, it: os.startfile(store.HOME)),
         pystray.MenuItem("Learn style", lambda i, it: threading.Thread(target=learn, args=(cfg,), daemon=True).start()),
         pystray.MenuItem(lambda it: "Resume" if S["paused"] else "Pause", toggle),

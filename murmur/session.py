@@ -22,7 +22,7 @@ class Session:
         self.held, self.current, self.done, self.mark = hooks.held, hooks.current, hooks.done, hooks.mark
         self.label = "Recording" if mode == "dictate" else "Command"
         self.stream, self.buf = None, []
-        self.raw, self.cleaned, self.inflight = "", ("", ""), (None, None)  # inflight = (raw being cleaned, Event)
+        self.raw, self.cleaned, self.inflight = "", ("", "", False), (None, None)  # cleaned = (raw, text, had_ctx); inflight = (raw, Event)
         self.app = self.title = ""
         self.ctx = {}
 
@@ -38,8 +38,11 @@ class Session:
                 return
             if COMMANDS.get(self.raw.lower().strip(" .,!")):  # phase 2c
                 return
+            self.reader.join(0.4)  # never block dictation on UIA
             self.mark("orange")
             final = self._finish_command() if self.mode == "command" else self._finish_dictate()
+            if final and self.mode == "dictate":
+                final = brain.fit(final, self.ctx.get("before", ""))
             if final:
                 self._paste_and_log(final)
         except Exception:
@@ -65,9 +68,16 @@ class Session:
         self.t0 = time.time()
         self.mark("red")
         self.ctx = {"cfg": self.cfg, **context.gather(self.cfg)}
+        self.reader = threading.Thread(target=self._read_field, daemon=True)
+        self.reader.start()  # UIA off the hotkey/Tk threads; live clean uses whatever has arrived
         self.app, self.title = self.ctx["app"], self.ctx["title"]
         where = f"{self.app} \u2014 {self.title[:60]}" if self.title else self.app
         self.ov.post(lambda: self.ov.show("#ff4444", f"{self.label} \u2192 {where}"))
+
+    def _read_field(self):
+        if self.app in self.cfg["apps"].get("no_copy", NO_COPY):
+            return  # terminal scrollback must not go into prompts
+        self.ctx.update(context.read_field(self.cfg))
 
     def _poll_loop(self):
         while self.held():
@@ -87,8 +97,9 @@ class Session:
 
     def _live(self, r, ev):
         try:
+            had_ctx = "before" in self.ctx  # a context-less result must not be reused once context arrives
             c = brain.clean(r, self.ctx)
-            self.cleaned = (r, c)
+            self.cleaned = (r, c, had_ctx)
             if self.current() and r == self.raw:  # a late result must not paint a newer session
                 self.ov.post(lambda: self.ov.update(r, c))
         except Exception as e:
@@ -101,7 +112,7 @@ class Session:
         self.ov.post(lambda: self.ov.header("#ffaa00", f"Cleaning \u2192 {self.app}"))
         if self.cleaned[0] != raw and self.inflight[0] == raw:
             self.inflight[1].wait(self.cfg["llm"].get("timeout", 15))  # reuse the in-flight request
-        if self.cleaned[0] == raw:
+        if self.cleaned[0] == raw and self.cleaned[2] == ("before" in self.ctx):
             return self.cleaned[1]
         try:
             return brain.clean(raw, self.ctx)
@@ -110,11 +121,11 @@ class Session:
             return raw
 
     def _finish_command(self):
-        sel = None
-        if self.app not in self.cfg["apps"].get("no_copy", NO_COPY):
+        sel, via = self.ctx.get("selected") or None, "UIA"
+        if not sel and self.app not in self.cfg["apps"].get("no_copy", NO_COPY):
             # ponytail: VS Code's empty-selection ctrl+c copies the whole line
-            sel = win.copy_selection()
-        note = f" (selection: {len(sel)} chars)" if sel else " (no selection)"
+            sel, via = win.copy_selection(), "clipboard"
+        note = f" (selection: {len(sel)} chars via {via})" if sel else " (no selection)"
         self.ov.post(lambda: self.ov.header("#ffaa00", f"{self.label} \u2192 {self.app}{note}"))
         try:
             return brain.rewrite(sel, self.raw, self.ctx)

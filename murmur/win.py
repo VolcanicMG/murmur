@@ -92,16 +92,23 @@ class Overlay:
     def post(self, fn):
         self.q.put(fn)
 
+    def _run_task(self, fn):
+        try:
+            fn()
+        except Exception:
+            logging.getLogger("murmur").exception("overlay task failed")
+
+    def _tick(self):
+        while not self.q.empty():
+            self._run_task(self.q.get())
+        if not self.recording:
+            return
+        self.bar.coords(self.fill, 0, 0, min(1.0, self.level * 10) * 200, 4)
+
     def run(self):
         def poll():
             try:
-                while not self.q.empty():
-                    try:
-                        self.q.get()()
-                    except Exception:
-                        logging.getLogger("murmur").exception("overlay task failed")
-                if self.recording:
-                    self.bar.coords(self.fill, 0, 0, min(1.0, self.level * 10) * 200, 4)
+                self._tick()
             finally:
                 self.root.after(50, poll)
         poll()

@@ -48,7 +48,7 @@ class T(unittest.TestCase):
         store.append_history({"ts": "2", "final": "b"})
         with open(store.HOME / "history.jsonl", "a") as f:
             f.write("{torn\n")
-        store.correct_last("1", "A")
+        store.correct_last("1", "a", "A")
         self.assertEqual([h.get("corrected") for h in store.read_history()], ["A", None])
 
     def test_dictionary_cap_keeps_newest(self):
@@ -88,6 +88,36 @@ class T(unittest.TestCase):
         self.assertNotIn("reasoning_effort", ab)
         self.assertEqual((ab["system"], ab["max_tokens"]), ("sys", 2048))
         self.assertEqual(a.get_header("X-api-key"), "k")
+
+    def test_fit(self):
+        self.assertEqual(brain.fit("world", "hello"), " world")
+        self.assertEqual(brain.fit(" world", "hello "), "world")
+        self.assertEqual(brain.fit("World", ""), "World")
+        self.assertEqual(brain.fit("World", "hi\n"), "World")
+        self.assertEqual(brain.fit(".", "hello"), ".")
+        self.assertEqual(brain.fit("we also fixed the login bug", "The deploy is done. "), "We also fixed the login bug")
+        self.assertEqual(brain.fit("the deploy is done. we also fixed it", "The deploy is done. "), "We also fixed it")
+        self.assertEqual(brain.fit("bumped", "update: we"), " bumped")
+        for b, f, want in (("Hey team.", "We pushed", " We pushed"), ("update:", "we", " we"), ("hi,", "we", " we"),
+                           ("Done!", "we", " We"), ("Done?", "ok", " Ok"), ('He said "', "hi", "hi"),
+                           ('He said "hi"', "and", " and")):
+            self.assertEqual(brain.fit(f, b), want)
+        self.assertEqual(brain.fit("and", 'said "yes"'), " and")
+
+    def test_context_section(self):
+        self.assertEqual(brain._context({}), "")
+        p = brain._context({"before": "We should ship", "after": "tomorrow.", "selected": "x"})
+        for s in ("«We should ship»", "«tomorrow.»", "REPLACE it: «x»", "lowercase"):
+            self.assertIn(s, p)
+        self.assertNotIn("new sentence", p)
+        done = brain._context({"before": "It is done. "})
+        self.assertIn("new sentence with a capital", done)
+        self.assertNotIn("lowercase", done)
+        cap = brain._context({"before": "a" * 50 + "END", "cfg": {"context": {"before_chars": 3}}})
+        self.assertIn("«END»", cap)
+        self.assertEqual(brain._context({"before": "x", "mode": "command"}), "")
+        self.assertIn("«hi»", brain.build_system_prompt({"before": "hi"}))
+        self.assertNotIn("«hi»", brain.build_system_prompt({"before": "hi"}, "command"))
 
     def test_custom_tone_and_prompt_file(self):
         cfg = store.load_config(); cfg["tones"] = {"tweet": "Tone: tweet."}
