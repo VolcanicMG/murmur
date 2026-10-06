@@ -1,8 +1,25 @@
 """Windows glue: foreground app, clipboard paste/type, DPI, window placement helpers."""
-import ctypes, time
+import ctypes, os, time
 from ctypes import wintypes
 import keyboard, pyperclip, win32api, win32gui, win32process
 from .theme import FILL, TEXT
+
+
+_mutex = None  # kept for the process lifetime
+
+
+def single_instance():
+    """True if this is the only murmur tray app; else tells the user (native box) and returns False. Always True off Windows."""
+    global _mutex
+    if os.name != "nt":
+        return True
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    _mutex = k32.CreateMutexW(None, False, "Local\\murmur-single-instance")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        ctypes.windll.user32.MessageBoxW(None, "murmur is already running. Look for the bubble in the system tray.", "murmur", 0x40)
+        return False
+    return True
 
 
 def active_app():
@@ -106,6 +123,18 @@ class _GTI(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD)] + [
         (n, wintypes.HWND) for n in ("hwndActive", "hwndFocus", "hwndCapture", "hwndMenuOwner", "hwndMoveSize", "hwndCaret")
     ] + [("rcCaret", wintypes.RECT)]
+
+
+def focus_hwnd():
+    """Focused window handle of the foreground thread (falls back to the foreground window)."""
+    try:
+        user32 = ctypes.windll.user32
+        fg = user32.GetForegroundWindow()
+        gti = _GTI(); gti.cbSize = ctypes.sizeof(_GTI)
+        user32.GetGUIThreadInfo(user32.GetWindowThreadProcessId(fg, None), ctypes.byref(gti))
+        return gti.hwndFocus or fg
+    except Exception:
+        return None
 
 
 def caret_rect():

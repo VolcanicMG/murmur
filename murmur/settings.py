@@ -5,8 +5,9 @@ from pathlib import Path
 from tkinter import ttk
 from types import SimpleNamespace
 import pyperclip
-from . import store, win
-from .theme import ACCENT, CMD_TEXT, ERROR, FILL, NAME, ON_ACCENT, SECONDARY, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts, rounded_points
+from . import cues, render, store, win
+from .theme import ACCENT, CMD_TEXT, ERROR, FIELD, FILL, HAIR, INPUT, NAME, ON_ACCENT, SECONDARY, SEL, SIDEBAR, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts
+from .widgets import Chip, Pill, Select, Tag, TextField, Tile, Toggle, photo, pill, put
 
 SECTIONS = {
     "History": "Everything murmur has typed for you, dictation and commands. Fix a row to teach it new spellings.",
@@ -16,8 +17,6 @@ SECTIONS = {
     "Tones": "How murmur writes in each kind of app. Map apps to tones in Config.",
     "Config": "Hotkeys, models and apps. Advanced holds the raw config.toml.",
 }
-HAIR, FIELD, SIDEBAR, SEL = on_fill(0.10), on_fill(0.04), on_fill(0.03), blend(ACCENT, FILL, 0.30)
-DANGER_TEXT = "#2A1412"
 
 
 def icon_path():
@@ -30,101 +29,6 @@ def status_kind(text):
     if low.startswith("saved") and "failed" not in low:
         return "success"
     return "error" if any(w in low for w in ("failed", "not saved", "can't", "cannot")) else "info"
-
-
-class _Round(tk.Canvas):
-    """Canvas that redraws a rounded shape plus content whenever it is resized or hovered."""
-
-    def __init__(self, parent, ui, height, **kw):
-        super().__init__(parent, height=ui.k(height), bg=parent.cget("bg"), highlightthickness=0, bd=0, **kw)
-        self.ui, self.hover = ui, False
-        self.bind("<Configure>", lambda e: self.draw())
-
-    def shape(self, r, fill, outline=""):
-        w, h = self.winfo_width(), self.winfo_height()
-        self.create_polygon(rounded_points((0.5, 0.5, w - 0.5, h - 0.5), self.ui.k(r)), fill=fill, outline=outline)
-
-    def draw(self):
-        self.delete("all")
-        self.paint()
-
-
-class Pill(_Round):
-    """32 px pill button: primary (accent), secondary (hairline), danger (error)."""
-
-    def __init__(self, parent, ui, text, command, kind="secondary"):
-        super().__init__(parent, ui, 32, cursor="hand2")
-        self.text, self.command, self.kind = text, command, kind  # 14 px horizontal padding, 32 px tall for every kind
-        self.config(width=ui.fonts["pill"].measure(text) + ui.k(28))
-        self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
-        self.bind("<ButtonRelease-1>", lambda e: self.command() if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height() else None)
-
-    def _hover(self, on):
-        self.hover = on
-        self.draw()
-
-    def paint(self):
-        """Pill from two end-cap ovals + a rectangle (filled) or arcs + lines (hairline); integer coords, radius = h/2."""
-        bg, w, h = self.cget("bg"), self.winfo_width(), self.winfo_height()
-        fill, fg, line = {"primary": (ACCENT, ON_ACCENT, ""), "danger": (ERROR, DANGER_TEXT, ""),
-                          "secondary": ("", NAME, on_fill(0.14))}[self.kind]
-        if self.hover:
-            fill = blend(WHITE, fill or bg, 0.08)
-        r = h // 2
-        if fill:
-            self.create_oval(0, 0, h - 1, h - 1, fill=fill, outline="")
-            self.create_oval(w - h, 0, w - 1, h - 1, fill=fill, outline="")
-            self.create_rectangle(r, 0, w - r, h, fill=fill, outline="")
-        if line:
-            self.create_arc(0, 0, h - 1, h - 1, start=90, extent=180, style="arc", outline=line)
-            self.create_arc(w - h, 0, w - 1, h - 1, start=270, extent=180, style="arc", outline=line)
-            self.create_line(r, 0, w - r, 0, fill=line); self.create_line(r, h - 1, w - r, h - 1, fill=line)
-        self.create_text(w / 2, h / 2, text=self.text, fill=fg, font=self.ui.fonts["pill"])
-
-
-class Chip(_Round):
-    """Sidebar section chip in the card's status-chip style."""
-
-    def __init__(self, parent, ui, text, command):
-        super().__init__(parent, ui, 30, cursor="hand2")
-        self.text, self.active = text, False
-        self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
-        self.bind("<Button-1>", lambda e: command())
-
-    def _hover(self, on):
-        self.hover = on
-        self.draw()
-
-    def set_active(self, on):
-        self.active = on
-        self.draw()
-
-    def paint(self):
-        k, h = self.ui.k, self.winfo_height()
-        if self.active or self.hover:
-            self.shape(15, on_fill(0.08 if self.active else 0.04))
-        if self.active:
-            r = k(3)
-            self.create_oval(k(14) - r, h / 2 - r, k(14) + r, h / 2 + r, fill=ACCENT, outline="")
-        self.create_text(k(26), h / 2, text=self.text, anchor="w", fill=ACCENT if self.active else SECONDARY, font=self.ui.fonts["chip"])
-
-
-class Tile(_Round):
-    """Stat tile: small label over a large value."""
-
-    def __init__(self, parent, ui, label):
-        super().__init__(parent, ui, 64, width=ui.k(10))  # natural width small so the row shares space evenly
-        self.label, self.value = label, "-"
-
-    def set(self, value):
-        self.value = str(value)
-        self.draw()
-
-    def paint(self):
-        k = self.ui.k
-        self.shape(12, FIELD)
-        self.create_text(k(14), k(18), text=self.label, anchor="w", fill=SECONDARY, font=self.ui.fonts["label"])
-        self.create_text(k(14), k(42), text=self.value, anchor="w", fill=TEXT, font=self.ui.fonts["tile"])
 
 
 class Status(tk.Frame):
@@ -142,85 +46,10 @@ class Status(tk.Frame):
     def set(self, text, kind=None):
         col = {"success": SUCCESS, "error": ERROR}.get(kind or status_kind(text), SECONDARY)
         self.dot.delete("all")
+        self.dot._imgs = []
         if text:
-            self.dot.create_oval(0, 0, self.ui.k(8) - 1, self.ui.k(8) - 1, fill=col, outline="")
+            put(self.dot, render.circle(self.ui.k(8), col), 0, 0)
         self.label.config(text=text, fg=col if kind or text else SECONDARY)
-
-
-INPUT = on_fill(0.08)  # input fill inside a card (cards are FIELD)
-
-
-class Toggle(tk.Canvas):
-    """44x24 pill switch: accent track when on, knob slides. get()/set() like the other form controls."""
-
-    def __init__(self, parent, ui):
-        k = ui.k
-        super().__init__(parent, width=k(44), height=k(24), bg=parent.cget("bg"), highlightthickness=0, bd=0, cursor="hand2")
-        self.k, self.on, self.pos = k, False, 0.0
-        self.bind("<Button-1>", lambda e: self.set(not self.on, animate=True))
-        self.draw()
-
-    def get(self):
-        return self.on
-
-    def set(self, on, animate=False):
-        self.on = bool(on)
-        if animate:
-            self._slide()
-        else:
-            self.pos = float(self.on); self.draw()
-
-    def _slide(self):
-        goal = float(self.on)
-        self.pos += max(-0.34, min(0.34, goal - self.pos))
-        self.draw()
-        if self.pos != goal:
-            self.after(16, self._slide)
-
-    def draw(self):
-        k, h, w = self.k, self.k(24), self.k(44)
-        self.delete("all")
-        col = blend(ACCENT, on_fill(0.14), self.pos)
-        self.create_oval(0, 0, h - 1, h - 1, fill=col, outline=""); self.create_oval(w - h, 0, w - 1, h - 1, fill=col, outline="")
-        self.create_rectangle(h // 2, 0, w - h // 2, h, fill=col, outline="")
-        x, r = k(3) + self.pos * (w - h), h // 2 - k(3)
-        self.create_oval(x, k(3), x + 2 * r, k(3) + 2 * r, fill=ON_ACCENT if self.on else NAME, outline="")
-
-
-class TextField(tk.Entry):
-    """Flat entry with get()/set(); `digits` restricts input to whole numbers."""
-
-    def __init__(self, parent, ui, width=20, digits=False):
-        super().__init__(parent, relief="flat", bd=0, bg=INPUT, fg=TEXT, insertbackground=ACCENT, selectbackground=SEL, selectforeground=TEXT,
-                         highlightthickness=1, highlightbackground=HAIR, highlightcolor=ACCENT, font=ui.fonts["body"], width=width)
-        if digits:
-            self.config(validate="key", validatecommand=(self.register(lambda v: v == "" or v.isdigit()), "%P"))
-
-    def set(self, v):
-        self.delete(0, "end"); self.insert(0, str(v))
-
-
-class Select(tk.OptionMenu):
-    """Flat dropdown; reset(options) swaps the choices."""
-
-    def __init__(self, parent, ui, options, var=None):
-        self.var, self.ui = var or tk.StringVar(value=options[0] if options else ""), ui
-        super().__init__(parent, self.var, *options)
-        self.config(bg=INPUT, fg=TEXT, activebackground=on_fill(0.14), activeforeground=TEXT, highlightthickness=1, highlightbackground=HAIR,
-                    relief="flat", bd=0, font=ui.fonts["body"], anchor="w", padx=ui.k(10), pady=ui.k(3), cursor="hand2", width=min(max([len(o) for o in options] + [8]), 34))
-        self["menu"].config(bg=blend(WHITE, FILL, 0.10), fg=TEXT, activebackground=SEL, activeforeground=TEXT, bd=0, relief="flat", font=ui.fonts["body"])
-
-    def reset(self, options):
-        menu = self["menu"]
-        menu.delete(0, "end")
-        for o in options:
-            menu.add_command(label=o, command=tk._setit(self.var, o))
-
-    def get(self):
-        return self.var.get()
-
-    def set(self, v):
-        self.var.set(v)
 
 
 DEFAULT_MIC = "System default"
@@ -287,25 +116,6 @@ class MicField(tk.Frame):
             self.status.set("No signal \u2014 check the input", "error")
         else:
             self.status.set(f"Mic ok \u00b7 peak {res:.2f}", "success")
-
-
-class Tag(_Round):
-    """Small rounded label button (removable chip / Remove)."""
-
-    def __init__(self, parent, ui, text, command):
-        super().__init__(parent, ui, 26, cursor="hand2")
-        self.text = text
-        self.config(width=ui.fonts["small"].measure(text) + ui.k(22))
-        self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
-        self.bind("<Button-1>", lambda e: command())
-
-    def _hover(self, on):
-        self.hover = on
-        self.draw()
-
-    def paint(self):
-        self.shape(13, on_fill(0.14 if self.hover else 0.09))
-        self.create_text(self.winfo_width() / 2, self.winfo_height() / 2, text=self.text, fill=TEXT if self.hover else NAME, font=self.ui.fonts["small"])
 
 
 class HotkeyField(tk.Frame):
@@ -375,8 +185,10 @@ class Panel(tk.Canvas):
     def _resize(self, e):
         self.itemconfig(self.win, width=e.width - 2 * self.pad)
         self.delete("bg")
-        self.create_polygon(rounded_points((0.5, 0.5, e.width - 0.5, e.height - 0.5), self.ui.k(12)), fill=FIELD, outline=HAIR, tags="bg")
-        self.tag_lower("bg")
+        self._imgs = []
+        if e.width > 1 and e.height > 1:
+            put(self, render.rounded((e.width, e.height), self.ui.k(12), FIELD, HAIR), 0, 0, "bg")
+            self.tag_lower("bg")
 
 
 class AppsTable(tk.Frame):
@@ -422,9 +234,9 @@ class AppsTable(tk.Frame):
 class ChipList(tk.Frame):
     """Removable exe-name chips (wrapping) plus an add entry. get() -> list."""
 
-    def __init__(self, parent, ui):
+    def __init__(self, parent, ui, lower=True):
         super().__init__(parent, bg=FIELD)
-        self.ui, self.items = ui, []
+        self.ui, self.items, self.lower = ui, [], lower
         self.flow = tk.Frame(self, bg=FIELD); self.flow.pack(fill="x")
         add = tk.Frame(self, bg=FIELD); add.pack(fill="x", pady=(ui.k(10), 0))
         self.name = TextField(add, ui, 18); self.name.pack(side="left", ipady=ui.k(5))
@@ -438,7 +250,10 @@ class ChipList(tk.Frame):
         self.items = list(items); self.render()
 
     def add(self):
-        if (n := self.name.get().strip().lower()) and n not in self.items:
+        n = self.name.get().strip()
+        if n and self.lower:
+            n = n.lower()
+        if n and n not in self.items:
             self.items.append(n); self.name.set(""); self.render()
 
     def render(self):
@@ -511,7 +326,7 @@ def _page(content, ui, title, desc):
 
 def _pills(page, ui, *specs):
     for label, cmd, kind in specs:
-        Pill(page.bar, ui, label, cmd, kind).pack(side="left", padx=(0, ui.k(8)))
+        pill(page.bar, ui, label, cmd, kind).pack(side="left", padx=(0, ui.k(8)))
 
 
 def _set(box, text):
@@ -724,71 +539,167 @@ def _scroll_frame(parent):
     return inner
 
 
+def _show_rows(widgets, on):
+    """Show/hide grid-managed widgets (a form row's label and control)."""
+    for w in widgets:
+        w.grid() if on else w.grid_remove()
+
+
 def _config_page(content, ui, status, after_save, standalone=False):
     """Form of cards over config.toml (Advanced = the raw editor); load() refills every control from disk over defaults."""
-    pg, fields, k = _page(content, ui, "Config", SECTIONS["Config"]), {}, ui.k
-    form = _scroll_frame(pg.body)
+    pg = _page(content, ui, "Config", SECTIONS["Config"])
+    B = SimpleNamespace(ui=ui, k=ui.k, form=_scroll_frame(pg.body), fields={}, status=status, standalone=standalone, after_save=after_save)
+    hooks = [c(B) for c in (_hotkeys_card, _dictation_card, _speech_card, _cleanup_card, _code_card, _apps_card)]  # each returns a post-load hook or None
+    raw = _advanced_card(B)
 
-    def card(title, note=None):
-        p = Panel(form, ui, title); p.pack(fill="x", pady=(0, k(12)))
-        if note:
-            _label(p.rows, ui, note, "small", SECONDARY, FIELD).pack(side="bottom", anchor="w", pady=(k(6), 0))
-        return p.rows
-    # rows share a 2-column grid; a card with a note packs the note below the grid frame
-    def grid_card(title, note=None):
-        rows = card(title, note)
-        g = tk.Frame(rows, bg=FIELD); g.pack(side="top", fill="x"); g.columnconfigure(0, minsize=k(210)); g.columnconfigure(1, weight=1)
-        return g
+    def load():
+        cfg = store.merged_config()
+        for path, w in B.fields.items():
+            _load_field(cfg, path, w)
+        raw.load()
+        for h in hooks:
+            h and h()
 
-    def row(g, path, label, widget, stretch=False):
-        if path:
-            fields[path] = widget
-        r = g.grid_size()[1]
-        lab = _label(g, ui, label, "body", NAME, FIELD); lab.grid(row=r, column=0, sticky="w", pady=k(5), padx=(0, k(16)))
-        widget.grid(row=r, column=1, sticky="ew" if stretch else "w", pady=k(5))
-        return lab, widget
-    def text(g, path, label):
-        lab, w = row(g, path, label, TextField(g, ui, 30), True)
-        w.grid_configure(ipady=k(5))
-        return lab, w
+    def save_form():
+        try:
+            store.save_config(store.form_to_cfg({p: w.get() for p, w in B.fields.items()}, store.load_config()))
+        except (ValueError, TypeError) as e:
+            status.set(f"Not saved: {e}", "error"); return
+        after_save()
+    raw.bind_buttons(load)
+    _pills(pg, ui, ("Save", save_form, "primary"), ("Reload", load, "secondary"))
+    _label(pg.bar, ui, "Saving the form rewrites config.toml and drops its comments.").pack(side="left", padx=(B.k(4), 0))
+    return pg, load
 
-    def number(g, path, label):
-        lab, w = row(g, path, label, TextField(g, ui, 8, digits=True))
-        w.grid_configure(ipady=k(5))
-        return lab, w
-    toggle = lambda g, path, label: row(g, path, label, Toggle(g, ui))
 
-    g = grid_card("Hotkeys", "Hotkey changes apply after restart." + (
-        " Recording a hotkey while murmur is running will trigger it \u2014 pause murmur from the tray first." if standalone else ""))
+def _load_field(cfg, path, w):
+    """Fill one form control from the merged config."""
+    if path == "apps":
+        tones = list(cfg.get("tones", {})) or list(store.DEFAULT_TONES)
+        w.set({a: t for a, t in cfg.get("apps", {}).items() if isinstance(t, str)}, tones)
+    elif path == "no_copy":
+        w.set(cfg.get("apps", {}).get("no_copy", store.NO_COPY))
+    else:
+        sec, key = path.split(".")
+        w.set(cfg.get(sec, {}).get(key, ""))
+
+
+def _card(B, title, note=None):
+    p = Panel(B.form, B.ui, title); p.pack(fill="x", pady=(0, B.k(12)))
+    if note:
+        n = _label(p.rows, B.ui, note, "small", SECONDARY, FIELD)
+        n.config(justify="left"); n.pack(side="bottom", anchor="w", pady=(B.k(6), 0))
+        p.rows.bind("<Configure>", lambda e: n.config(wraplength=e.width))  # wrap to the card's inner width
+    return p.rows
+
+
+def _grid_card(B, title, note=None):
+    """A card whose rows share a 2-column grid; a note is packed below the grid frame."""
+    g = tk.Frame(_card(B, title, note), bg=FIELD); g.pack(side="top", fill="x")
+    g.columnconfigure(0, minsize=B.k(210)); g.columnconfigure(1, weight=1)
+    return g
+
+
+def _row(B, g, path, label, widget):
+    if path:
+        B.fields[path] = widget
+    r = g.grid_size()[1]
+    lab = _label(g, B.ui, label, "body", NAME, FIELD); lab.grid(row=r, column=0, sticky="w", pady=B.k(5), padx=(0, B.k(16)))
+    widget.grid(row=r, column=1, sticky="w", pady=B.k(5))
+    return lab, widget
+
+
+def _text_row(B, g, path, label):
+    lab, w = _row(B, g, path, label, TextField(g, B.ui, 30))
+    w.grid_configure(ipady=B.k(5), sticky="ew")
+    return lab, w
+
+
+def _number_row(B, g, path, label):
+    lab, w = _row(B, g, path, label, TextField(g, B.ui, 8, digits=True))
+    w.grid_configure(ipady=B.k(5))
+    return lab, w
+
+
+def _toggle_row(B, g, path, label):
+    return _row(B, g, path, label, Toggle(g, B.ui))
+
+
+def _hotkeys_card(B):
+    g = _grid_card(B, "Hotkeys", "Hotkey changes apply after restart." + (
+        " Recording a hotkey while murmur is running will trigger it \u2014 pause murmur from the tray first." if B.standalone else ""))
     for key, label in (("dictate", "Dictate (hold)"), ("command", "Command (hold)"), ("fix_last", "Fix last"), ("learn_word", "Learn word")):
-        row(g, f"hotkeys.{key}", label, HotkeyField(g, ui, status))
-    g = grid_card("Dictation")
-    toggle(g, "llm.live_clean", "Live cleanup")
-    row(g, "audio.device", "Microphone", MicField(g, ui, status))
-    row(g, "output.method", "Output method", Select(g, ui, ["paste", "type"]))
-    toggle(g, "context.enabled", "Read text around the cursor")
-    number(g, "context.before_chars", "Context before (chars)"); number(g, "context.after_chars", "Context after (chars)")
-    toggle(g, "ui.startup_toast", "Startup notification")
-    g = grid_card("Speech model")
-    text(g, "stt.model", "Model"); row(g, "stt.quantization", "Quantization", Select(g, ui, ["int8", "none"]))
-    g = grid_card("Cleanup model")
-    provider = Select(g, ui, ["openai", "anthropic"]); row(g, "llm.provider", "Provider", provider)
-    text(g, "llm.url", "URL"); text(g, "llm.model", "Model"); number(g, "llm.timeout", "Timeout (s)")
-    key_row = text(g, "llm.api_key_env", "API key env var")
-    lms_rows = text(g, "llm.lms", "LM Studio CLI") + text(g, "llm.lms_load", "LM Studio load command")
+        _row(B, g, f"hotkeys.{key}", label, HotkeyField(g, B.ui, B.status))
+
+
+def _dictation_card(B):
+    g, ui, k = _grid_card(B, "Dictation"), B.ui, B.k
+    _toggle_row(B, g, "llm.live_clean", "Live cleanup")
+    _row(B, g, "audio.device", "Microphone", MicField(g, ui, B.status))
+    _row(B, g, "output.method", "Output method", Select(g, ui, ["paste", "type"]))
+    _toggle_row(B, g, "context.enabled", "Read text around the cursor")
+    _number_row(B, g, "context.before_chars", "Context before (chars)"); _number_row(B, g, "context.after_chars", "Context after (chars)")
+    _toggle_row(B, g, "ui.startup_toast", "Startup notification")
+    _toggle_row(B, g, "dictation.toggle", "Tap to toggle (hands-free)")
+    _number_row(B, g, "dictation.silence_ms", "Stop after silence (ms)")
+    _toggle_row(B, g, "ui.sounds", "Sounds")
+    vol = Select(g, ui, ["0.1", "0.25", "0.5"])
+    _row(B, g, "ui.sound_volume", "Sound volume", vol)
+
+    def play_test():
+        cues.play("start", {"ui": {"sounds": True, "sound_volume": float(vol.get() or 0.25)}})
+    Pill(g, ui, "Test", play_test).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(vol.px + k(8), 0))  # same cell as the Select: no third column to widen the card
+
+
+def _speech_card(B):
+    g = _grid_card(B, "Speech model")
+    _text_row(B, g, "stt.model", "Model"); _row(B, g, "stt.quantization", "Quantization", Select(g, B.ui, ["int8", "none"]))
+
+
+def _cleanup_card(B):
+    """Cleanup model + optional fallback; returns the hook that applies provider/fallback row visibility after a load."""
+    g, ui = _grid_card(B, "Cleanup model", "The fallback sends your dictated text to that provider."), B.ui
+    provider = Select(g, ui, ["openai", "anthropic"]); _row(B, g, "llm.provider", "Provider", provider)
+    _text_row(B, g, "llm.url", "URL"); _text_row(B, g, "llm.model", "Model"); _number_row(B, g, "llm.timeout", "Timeout (s)")
+    key_row = _text_row(B, g, "llm.api_key_env", "API key env var")
+    lms_rows = _text_row(B, g, "llm.lms", "LM Studio CLI") + _text_row(B, g, "llm.lms_load", "LM Studio load command")
 
     def show_provider(*_):
-        for ws, on in ((key_row, provider.get() == "anthropic"), (lms_rows, provider.get() == "openai")):
-            for w in ws:
-                w.grid() if on else w.grid_remove()
+        _show_rows(key_row, provider.get() == "anthropic"); _show_rows(lms_rows, provider.get() == "openai")
     provider.var.trace_add("write", show_provider)
-    rows = card("Apps & tones")
-    _label(rows, ui, "Process name to tone", "small", SECONDARY, FIELD).pack(anchor="w", pady=(0, k(4)))
-    fields["apps"] = AppsTable(rows, ui); fields["apps"].pack(fill="x")
-    _label(rows, ui, "Never copy selection in (command mode)", "small", SECONDARY, FIELD).pack(anchor="w", pady=(k(14), k(4)))
-    fields["no_copy"] = ChipList(rows, ui); fields["no_copy"].pack(fill="x")
+    fb_on = Toggle(g, ui); _row(B, g, "llm.fallback", "Fall back to a second provider when the first is down", fb_on)
+    fb_prov = Select(g, ui, ["openai", "anthropic"]); fb_rows = list(_row(B, g, "llm_fallback.provider", "Provider", fb_prov))
+    fb_rows += _text_row(B, g, "llm_fallback.url", "URL") + _text_row(B, g, "llm_fallback.model", "Model")
+    fb_rows += _number_row(B, g, "llm_fallback.timeout", "Timeout (s)") + _text_row(B, g, "llm_fallback.api_key_env", "API key env var")
+    show_fallback = lambda *_: _show_rows(fb_rows, fb_on.get())
+    fb_on.bind("<Button-1>", lambda e: g.after(1, show_fallback), add="+")
 
-    adv = Panel(form, ui, "Advanced"); adv.pack(fill="x", pady=(0, k(12)))
+    def after_load():
+        provider.var.set(provider.get())  # fire the show/hide trace
+        show_fallback()
+    return after_load
+
+
+def _code_card(B):
+    rows, k = _card(B, "Code"), B.k
+    cg = tk.Frame(rows, bg=FIELD); cg.pack(side="top", fill="x"); cg.columnconfigure(0, minsize=k(210)); cg.columnconfigure(1, weight=1)
+    _row(B, cg, "code.file_tags", "File tags", Select(cg, B.ui, ["off", "chat", "always"]))
+    _label(rows, B.ui, "Workspace roots to index (besides the folder VS Code, Cursor or Windsurf has open)", "small", SECONDARY, FIELD).pack(anchor="w", pady=(k(10), k(4)))
+    B.fields["code.roots"] = ChipList(rows, B.ui, lower=False); B.fields["code.roots"].pack(fill="x")
+
+
+def _apps_card(B):
+    rows, k = _card(B, "Apps & tones"), B.k
+    _label(rows, B.ui, "Process name to tone", "small", SECONDARY, FIELD).pack(anchor="w", pady=(0, k(4)))
+    B.fields["apps"] = AppsTable(rows, B.ui); B.fields["apps"].pack(fill="x")
+    _label(rows, B.ui, "Never copy selection in (command mode)", "small", SECONDARY, FIELD).pack(anchor="w", pady=(k(14), k(4)))
+    B.fields["no_copy"] = ChipList(rows, B.ui); B.fields["no_copy"].pack(fill="x")
+
+
+def _advanced_card(B):
+    """The raw config.toml editor; returns an object with load() and bind_buttons(reload) (it needs the page's reload callback)."""
+    ui, k = B.ui, B.k
+    adv = Panel(B.form, ui, "Advanced"); adv.pack(fill="x", pady=(0, k(12)))
     _label(adv.rows, ui, "The raw config.toml. Saving here keeps comments; the form above drops them.", "small", SECONDARY, FIELD).pack(anchor="w")
     raw = tk.Frame(adv.rows, bg=FIELD)
     box, edit = _scrolled(raw, lambda p: _text(p, ui, 14)); box.pack(fill="x", pady=(k(8), 0))
@@ -804,39 +715,20 @@ def _config_page(content, ui, status, after_save, standalone=False):
     arrow.pack(anchor="w", pady=(k(6), 0)); arrow.bind("<Button-1>", lambda e: toggle_raw())
 
     def load():
-        cfg = store.merged_config()
-        for path, w in fields.items():
-            if path == "apps":
-                tones = list(cfg.get("tones", {})) or list(store.DEFAULT_TONES)
-                w.set({a: t for a, t in cfg.get("apps", {}).items() if isinstance(t, str)}, tones)
-            elif path == "no_copy":
-                w.set(cfg.get("apps", {}).get("no_copy", store.NO_COPY))
-            else:
-                sec, key = path.split(".")
-                w.set(cfg.get(sec, {}).get(key, ""))
         _set(edit, (store.HOME / "config.toml").read_text(encoding="utf-8")); err.config(text="")
-        provider.var.set(provider.get())  # fire the show/hide trace
-
-    def save_form():
-        try:
-            store.save_config(store.form_to_cfg({p: w.get() for p, w in fields.items()}, store.load_config()))
-        except (ValueError, TypeError) as e:
-            status.set(f"Not saved: {e}", "error"); return
-        after_save()
 
     def save_raw():
         raw_text = edit.get("1.0", "end")
         try:
             tomllib.loads(raw_text)
         except tomllib.TOMLDecodeError as e:
-            err.config(text=f"Not saved: {e}"); status.set("Not saved: config.toml has a syntax error", "error"); return
+            err.config(text=f"Not saved: {e}"); B.status.set("Not saved: config.toml has a syntax error", "error"); return
         (store.HOME / "config.toml").write_text(raw_text, encoding="utf-8")
-        after_save()
-    Pill(btns, ui, "Save raw", save_raw, "primary").pack(side="left", padx=(0, k(8))); Pill(btns, ui, "Reload", load).pack(side="left")
-    _pills(pg, ui, ("Save", save_form, "primary"), ("Reload", load, "secondary"))
-    _label(pg.bar, ui, "Saving the form rewrites config.toml and drops its comments.").pack(side="left", padx=(k(4), 0))
-    return pg, load
+        B.after_save()
 
+    def bind_buttons(reload):
+        pill(btns, ui, "Save raw", save_raw, "primary").pack(side="left", padx=(0, k(8))); Pill(btns, ui, "Reload", reload).pack(side="left")
+    return SimpleNamespace(load=load, bind_buttons=bind_buttons)
 
 
 def open_settings(root, cfg, fix=None, standalone=False, start="History"):

@@ -9,6 +9,10 @@ From WSL in the repo root:
 ```
 This stages `murmur/`, `murmur.spec` and `packaging/entry.py` to `%LOCALAPPDATA%\murmur-build`, runs PyInstaller through the Windows venv Python (`C:\Users\ethan\.murmur\venv`, PyInstaller 6.22.3), and copies `dist/murmur.exe` to `%LOCALAPPDATA%\Programs\murmur\murmur.exe` (a Desktop shortcut points there; the exe is kept out of OneDrive because OneDrive serves a stale icon for synced exes and would upload 60 MB per build). The build runs on the Windows filesystem because the `\\wsl$` share is slow and flaky for PyInstaller; WSL only orchestrates. ~20 s, ~60 MB.
 
+The only build-time dependency is pinned in `requirements-build.txt` at the repo root (`pip install -r requirements-build.txt` in the Windows venv; PyInstaller 6.22.3).
+
+**Icon:** `murmur.ico` must be written with BMP/DIB entries (PIL `Image.save("murmur.ico", sizes=..., bitmap_format="bmp")`). Explorer ignores PNG-compressed icon sizes below 256 px and shows the default icon for the exe.
+
 ## Embedded vs downloaded
 - Embedded: Python, onnxruntime, numpy, tkinter/Tcl, pystray/Pillow, uiautomation/comtypes, onnx-asr (its preprocessor `.onnx` data and dist-info metadata, which it reads at import).
 - Downloaded on first run: the Parakeet model (~600 MB) into the Hugging Face cache via onnx-asr. The log says "loading speech model (the first run downloads ~600 MB, one time)". The window-less exe shows nothing while this happens; watch `~/.murmur/murmur.log`.

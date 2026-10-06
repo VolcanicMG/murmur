@@ -70,6 +70,20 @@ class T(unittest.TestCase):
         m = store.merged_config({"llm": {"model": "x"}, "apps": {"a.exe": "code"}})
         self.assertEqual((m["llm"]["model"], m["llm"]["timeout"], m["hotkeys"]["dictate"]), ("x", 15, "right ctrl"))
         self.assertEqual(m["apps"], {"a.exe": "code"})
+        m = store.merged_config({"hotkeys": {"dictate": "right ctrl"}})  # a config predating learn_word still shows it
+        self.assertEqual(m["hotkeys"]["learn_word"], "ctrl+alt+d")
+
+    def test_form_sound_volume_and_fallback(self):
+        base = store.merged_config()
+        cfg = store.form_to_cfg({"ui.sound_volume": "0.5", "ui.sounds": True, "llm.fallback": True, "llm_fallback.timeout": "9"}, base)
+        self.assertEqual((cfg["ui"]["sound_volume"], cfg["llm"]["fallback"], cfg["llm_fallback"]["timeout"]), (0.5, True, 9))
+        with self.assertRaises(ValueError):
+            store.form_to_cfg({"ui.sound_volume": "7"}, base)
+        self.assertEqual(base["llm_fallback"]["model"], "claude-haiku-4-5-20251001")
+
+    def test_learn_subcommand_skips_the_single_instance_check(self):  # D4
+        src = (Path(__file__).resolve().parent.parent / "murmur" / "__main__.py").read_text(encoding="utf-8")
+        self.assertLess(src.index('a.cmd == "learn"'), src.index("single_instance()"))
 
     def test_resolve_device(self):
         devs = [{"name": "Speakers", "max_input_channels": 0}, {"name": "Microphone (USB Audio)", "max_input_channels": 1},

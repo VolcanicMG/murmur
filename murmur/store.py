@@ -37,16 +37,36 @@ url = "http://localhost:1234/v1/chat/completions"
 model = "google/gemma-4-e4b"
 live_clean = true
 timeout = 15
+fallback = false  # on a primary failure, retry on [llm_fallback] (sends your text there)
 lms = "C:/Users/ethan/.lmstudio/bin/lms.exe"
 lms_load = "C:/Users/ethan/.lmstudio/bin/lms.exe load google/gemma-4-e4b --gpu max -y --context-length 8192"
 
+[llm_fallback]
+provider = "anthropic"
+url = "https://api.anthropic.com/v1/messages"
+model = "claude-haiku-4-5-20251001"
+api_key_env = "ANTHROPIC_API_KEY"
+timeout = 15
+
 [ui]
 startup_toast = true  # one-shot "murmur is running" notification
+sounds = true  # soft start/stop/done/error cues
+sound_volume = 0.25  # 0-1
 
 [context]
 enabled = true  # read text around the cursor via UI Automation
 before_chars = 600
 after_chars = 200
+
+[dictation]
+toggle = true  # tap the dictate key (< tap_ms) to latch hands-free recording; tap again to stop
+tap_ms = 300
+silence_ms = 2000  # hands-free: stop after this much silence once you have spoken
+no_speech_ms = 6000  # hands-free: cancel if nothing is said within this long
+
+[code]
+file_tags = "chat"  # "off" | "chat" (AI chat inputs: @path) | "always" (`path` in the editor, @path in chat)
+roots = []  # extra workspace folders to index for file tags
 
 [audio]
 device = ""  # input device name; "" = system default (pick one in Settings > Config)
@@ -271,7 +291,7 @@ def resolve_device(name, devices):
     return next((i for i, n in ins if n == name), next((i for i, n in ins if low in n.lower()), None))
 
 
-INT_KEYS = ("llm.timeout", "context.before_chars", "context.after_chars")
+INT_KEYS = ("dictation.tap_ms", "dictation.silence_ms", "dictation.no_speech_ms", "llm.timeout", "llm_fallback.timeout", "context.before_chars", "context.after_chars")
 HOTKEYS = ("dictate", "command", "fix_last", "learn_word")
 
 
@@ -290,12 +310,19 @@ def form_to_cfg(values, base):
                 v = -1
             if v < 0:
                 raise ValueError(f"{path} must be a whole number, 0 or more")
+        elif path == "ui.sound_volume":
+            try:
+                v = float(str(v).strip())
+            except ValueError:
+                v = -1
+            if not 0 <= v <= 1:
+                raise ValueError("ui.sound_volume must be between 0 and 1")
         elif isinstance(v, str):
             v = v.strip()
             if sec == "hotkeys" and not v:
                 raise ValueError(f"hotkey {key} can't be empty")
-            if path == "llm.url" and not v.startswith("http"):
-                raise ValueError("llm.url must start with http")
+            if path in ("llm.url", "llm_fallback.url") and not v.startswith("http"):
+                raise ValueError(f"{path} must start with http")
         cfg.setdefault(sec, {})[key] = v
     cfg["apps"] = {**values.get("apps", {}), "no_copy": list(values.get("no_copy", []))}
     return cfg

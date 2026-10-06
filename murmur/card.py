@@ -1,4 +1,6 @@
-"""Caption Card overlay: one tk.Canvas, drawn on the Tk main thread. Design source of truth:
+"""Caption Card overlay on the Tk main thread. Default renderer: a per-pixel-alpha layered window fed PIL frames from
+cardpaint.Painter (real translucency, shadow, anti-aliased shapes); fallback: a chroma-key Canvas (flag LAYERED / failure
+of UpdateLayeredWindow at startup). Design source of truth:
 C:\\Users\\ethan\\Downloads\\Dictation software interface design\\design_handoff_dictation_caption_card\\README.md
 
 Pure helpers (blend, bar_heights, norm_level, place, ellipsize) have no tk/win32 imports and are unit-tested on Linux.
@@ -9,8 +11,9 @@ log = logging.getLogger("murmur")
 from .theme import ACCENT, CMD_TEXT, ERR_TEXT, ERROR, FILL, NAME, SECONDARY, SUCCESS, TAIL, TEXT, WHITE, blend, pick_fonts, rounded_points
 
 RETRY_TEXT = "#2A1412"
+LAYERED = True  # False forces the old chroma-key Canvas renderer
 KEY = "#010203"  # chroma key: Tk can't do per-pixel alpha, so the card shape is cut out of the window
-W, TAIL_PX, ALPHA = 560, 10, 0.96
+W, TAIL_PX, ALPHA, MAX_LINES = 560, 10, 0.96, 7  # MAX_LINES: transcript lines kept (the newest)
 # label, colour, text colour, bars kind, hints, retry, auto-dismiss ms, default text, keys bound (live session)
 STATES = {
     "listening": ("Listening", ACCENT, TEXT, "live", True, False, None, "Start speaking\u2026", True),
@@ -61,16 +64,54 @@ def norm_level(rms):
     return 1 - math.exp(-max(rms, 0.0) * 14)
 
 
-def place(size, field, work, gap=16, margin=12):
-    """Card top-left and tail direction. Above the field if it fits, else flipped below; clamped to the work area."""
+GAP, MARGIN = 16, 12  # card distance from the field, minimum distance from the screen edge
+
+
+def place(size, field, work, kind="caret"):
+    """Card top-left and tail direction. Above the field if it fits, else flipped below; clamped to the work area.
+    kind "pane" (field is a whole editor pane, no caret found): sit inside it near the bottom-left, never flip."""
     (w, h), (fl, ft, fr, fb) = size, field
     wl, wt, wr, wb = work
+    gap, margin = GAP, MARGIN
+    if kind == "pane":
+        return max(wl + margin, min(fl + 16, wr - margin - w)), max(wt + margin, min(fb - 16 - h, wb - margin - h)), False
     y, tail_up = ft - gap - h, False
     if y < wt + margin:
         y, tail_up = fb + gap, True
     x = max(wl + margin, min(fl, wr - margin - w))
     y = max(wt + margin, min(y, wb - margin - h))
     return x, y, tail_up
+
+
+def _sane(r, ctl_rect):
+    """A believable caret rect: positive size, at most 80 px tall, touching the control."""
+    if not r:
+        return False
+    l, t, rr, b = r
+    if rr <= l or b <= t or b - t > 80:
+        return False
+    cl, ct, cr, cb = ctl_rect
+    return l < cr and rr > cl and t < cb and b > ct
+
+
+def pick_rect(providers, ctl_rect):
+    """((l, t, r, b), kind). providers: callables returning a caret rect or None, tried in order (exceptions skipped);
+    the first sane one wins -> kind "caret". Otherwise the control rect: "field" if <= 200 px tall, else "pane" (an editor
+    pane, not the line being typed)."""
+    for p in providers:
+        try:
+            r = p()
+        except Exception:
+            continue
+        if _sane(r, ctl_rect):
+            return tuple(r), "caret"
+    return tuple(ctl_rect), "pane" if ctl_rect[3] - ctl_rect[1] > 200 else "field"
+
+
+def win32_hwnd(root):
+    """Real top-level hwnd of a Tk window (the wrapper above winfo_id)."""
+    import win32gui
+    return win32gui.GetParent(root.winfo_id()) or root.winfo_id()
 
 
 def ellipsize(text, n=28):
@@ -89,15 +130,37 @@ class Card:
         prev = win.foreground()  # Tk init steals focus; handed back below
         self.demo, self.q, self.level = demo, queue.Queue(), 0.0
         self.recording, self.visible, self.handlers, self._keys = False, False, {}, []
-        self.tail_up, self.card_x = False, 0
+        self.tail_up, self.card_x, self.kind = False, 0, "caret"
         self.st, self.text, self.interim, self.field, self.dest, self.label_o = "listening", "", "", None, "", None
         self.lvl, self._t_last, self._anim = 0.0, time.monotonic(), None  # smoothed level; ("in"|"out", t0)
         self._col_from, self._col_t0, self._dismiss_id, self._geom, self.level_fn = ACCENT, 0.0, None, "", None
         self.root = r = tk.Tk()
         r.title("murmur card"); r.overrideredirect(True)
-        r.attributes("-topmost", True, "-alpha", 0.0, "-transparentcolor", KEY)
-        r.configure(bg=KEY)
+        r.attributes("-topmost", True)
         self.s = win.dpi_scale(r)
+        self._retry_box, self._ms, self.layered, self.pad = None, [], False, 0
+        self._shown = self._pos = self._a = None
+        self.root.geometry("2x2+-32000+-32000")
+        r.update()
+        win.no_activate(r)
+        if LAYERED:
+            try:
+                from .cardpaint import Painter, View
+                from .layered import Layered
+                self.lw, self.p, self._view = Layered(win32_hwnd(r)), Painter(self.s), View
+                self.pad, self.layered = self.p.pad, True
+                r.bind("<Button-1>", self._click)
+            except Exception:
+                log.exception("layered card window unavailable, using the chroma-key renderer")
+        if not self.layered:
+            self._init_keyed(tk, tkfont)
+        win.refocus(prev)
+
+    def _init_keyed(self, tk, tkfont):
+        """Old renderer: chroma-key window + Canvas (no shadow, no real translucency)."""
+        r = self.root
+        r.attributes("-alpha", 0.0, "-transparentcolor", KEY)
+        r.configure(bg=KEY)
         self.c = tk.Canvas(r, bg=KEY, highlightthickness=0, bd=0)
         self.c.pack(fill="both", expand=True); self.c.bind("<Button-1>", self._click)
         ui, semi, mono = pick_fonts(set(tkfont.families()))
@@ -106,11 +169,7 @@ class Card:
                   "dest": tkfont.Font(family=ui, size=px(12.5)), "destb": tkfont.Font(family=semi, size=px(12.5)),
                   "hint": tkfont.Font(family=ui, size=px(12)), "key": tkfont.Font(family=mono, size=px(11)),
                   "retry": tkfont.Font(family=semi, size=px(13))}
-        self.root.geometry("2x2+-32000+-32000")
         r.update()
-        win.no_activate(r)
-        win.refocus(prev)
-        self._retry_box = None
 
     # ---- threading contract
     def post(self, fn):
@@ -137,7 +196,7 @@ class Card:
         """Start a live session card. mode: dictate|command. handlers: {cancel, enter, retry} callables."""
         self._cancel_dismiss()
         self.recording, self.handlers, self.dest = True, handlers or {}, ellipsize(destination)
-        self.field = field or self._fallback_field()
+        self.field, self.kind = field or self._fallback_field(), "caret"
         self.text = self.interim = ""
         self._set_state("command" if mode == "command" else "listening", fade=False)
         self._appear()
@@ -153,16 +212,16 @@ class Card:
     def transcript(self, final, interim=""):
         self.text, self.interim = final, interim
 
-    def anchor(self, rect):
-        """Field rect (l, t, r, b) in screen pixels; the card jumps to it."""
-        self.field = tuple(rect)
+    def anchor(self, rect, kind="field"):
+        """Field rect (l, t, r, b) in screen pixels; the card jumps to it. kind: "caret" | "field" | "pane"."""
+        self.field, self.kind = tuple(rect), kind
 
     def flash(self, name, text=None, label=None, handlers=None):
         """Notice outside a session (learned word, nothing to undo); skipped while a session is live."""
         if self.recording:
             return
         self._cancel_dismiss()
-        self.handlers, self.dest, self.field = handlers or {}, "", self._fallback_field()
+        self.handlers, self.dest, self.field, self.kind = handlers or {}, "", self._fallback_field(), "caret"
         self.text = self.interim = ""
         if text is not None:
             self.text = text
@@ -253,8 +312,8 @@ class Card:
             fn()
 
     def _click(self, e):
-        b = self._retry_box
-        if self.st == "error" and b and b[0] <= e.x / self.s <= b[2] and b[1] <= e.y / self.s <= b[3]:
+        b, x, y = self._retry_box, (e.x - self.pad) / self.s, (e.y - self.pad) / self.s  # card-local design px
+        if self.st == "error" and b and b[0] <= x <= b[2] and b[1] <= y <= b[3]:
             retry = self.handlers.get("retry")
             self.hide()
             if retry:
@@ -274,7 +333,7 @@ class Card:
         from . import win
         f = self.field
         work = win.work_area((f[0], f[1]))
-        x, y, up = place((W * self.s, card_h * self.s), f, work)
+        x, y, up = place((W * self.s, card_h * self.s), f, work, kind=self.kind)
         y0 = y - (TAIL_PX * self.s if up else 0)
         self.tail_up, self.card_x = up, x
         return f"{round(W * self.s)}x{round((card_h + TAIL_PX) * self.s)}+{round(x)}+{round(y0 + slide)}"
@@ -289,27 +348,54 @@ class Card:
             tgt = max(tgt, 0.1 + 0.05 * abs(math.sin(now * 5.5)))  # idle wobble until speech arrives
         tau = 0.08 if tgt > self.lvl else 0.2
         self.lvl += (tgt - self.lvl) * (1 - math.exp(-dt / tau))
-        alpha, slide = ALPHA, 0.0
+        alpha, slide = 1.0 if self.layered else ALPHA, 0.0
+        base = alpha
         if self._anim:
             kind, t0 = self._anim
             dur = 0.18 if kind == "in" else 0.14
             p = min(1.0, (now - t0) / dur)
             e = 1 - (1 - p) ** 3 if kind == "in" else p ** 2
-            alpha = ALPHA * (e if kind == "in" else 1 - e)
+            alpha = base * (e if kind == "in" else 1 - e)
             slide = 6 * self.s * (1 - e) if kind == "in" else 6 * self.s * e
             if p >= 1.0:
                 self._anim = None
                 if kind == "out":
                     self.visible = False
+                    if self.layered:
+                        self.lw.update(self.lw.im, -32000, -32000, 0)
+                        self._shown = self._pos = self._a = None
+                        return
                     self.root.attributes("-alpha", 0.0)
                     self.root.geometry("2x2+-32000+-32000"); self._geom = ""
                     return
+        if self.layered:
+            return self._paint(now, alpha, slide)
         card_h = self._draw(now)
         g = self._geometry(card_h, slide)
         if g != self._geom:
             self._geom = g
             self.root.geometry(g)
         self.root.attributes("-alpha", alpha)
+
+    def _paint(self, now, alpha, slide):
+        """Layered renderer: compose a PIL frame and push it with UpdateLayeredWindow (skipped when nothing changed)."""
+        from . import win
+        t0 = time.perf_counter()
+        p, s, f = self.p, self.s, self.field
+        lay = p.layout(self.st, self.text, self.interim)
+        x, y, up = place((W * s, lay.ch * s), f, win.work_area((f[0], f[1])), kind=self.kind)
+        self.tail_up, self.card_x = up, x
+        tcx = min(max(43 + (f[0] - x) / s, 24), W - 24)  # tail 43 px from the visible left edge unless the card was clamped
+        label = self.label_o or STATES[self.st][0]
+        img = p.draw(lay, self._view(label, self._color(), self.dest, up, tcx, self.lvl, now))
+        self._retry_box = p.retry_box
+        pos, a = (round(x) - self.pad, round(y + slide) - self.pad), round(255 * alpha)
+        if img is not self._shown or pos != self._pos or a != self._a:
+            if self._shown is None or img.size != self._shown.size:
+                self.root.geometry(f"{img.width}x{img.height}+{pos[0]}+{pos[1]}")  # keeps Tk's idea of the hwnd rect (hit-testing) right
+            self.lw.update(img, pos[0], pos[1], a)
+            self._shown, self._pos, self._a = img, pos, a
+        self._ms.append((time.perf_counter() - t0) * 1000)
 
     # ---- drawing (design px; the whole canvas is scaled by self.s at the end)
     def _rrect(self, rect, r, fill, outline=""):
@@ -449,6 +535,14 @@ def demo(state=None):
         c.state(name, text); c.transcript(text, interim)
         c._cancel_dismiss()  # demo holds each state
 
+    def bench():  # composition + UpdateLayeredWindow time over the first 200 frames, written next to the screenshots
+        if len(c._ms) < 200:
+            return c.root.after(500, bench)
+        from . import store
+        ms = sorted(c._ms[:200])
+        out = f"layered={c.layered} scale={c.s} frames=200 avg={sum(ms) / 200:.2f}ms p95={ms[189]:.2f}ms max={ms[-1]:.2f}ms\n"
+        (store.HOME / "shots").mkdir(exist_ok=True); (store.HOME / "shots" / "card-frame-ms.txt").write_text(out)
+    c.root.after(500, bench)
     if state:
         c.root.after(300, lambda: apply(state))
     else:

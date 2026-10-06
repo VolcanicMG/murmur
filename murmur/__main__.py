@@ -32,6 +32,11 @@ def boot(cfg):
     """Load the speech model (first run downloads ~600 MB) and make sure the LLM is up."""
     log.info("loading speech model (the first run downloads ~600 MB, one time)")
     stt.load_model(cfg)
+    try:
+        import comtypes.client
+        comtypes.client.GetModule("oleacc.dll")  # warm the MSAA typelib so the first dictation doesn't pay for it
+    except Exception as e:
+        log.info("oleacc warm-up failed: %s", e)
     start_llm(cfg)
 
 
@@ -51,7 +56,7 @@ def selftest(real=False):
     t = time.time(); c = brain.clean(raw, ctx); print(f"cleaned ({time.time() - t:.2f}s): {c}")
     from . import context
     f = context.read_field(cfg)
-    print("context:", {k: len(v) for k, v in f.items()} or "none")
+    print("context:", {k: (len(v) if isinstance(v, str) else v) for k, v in f.items()} or "none")
     print("snippets:", brain.apply_snippets("Thanks! {{snippet:SIG}}", store.load_snippets()))
     print("shortcut:", brain.snippet_only("Insert sig.", store.load_snippets()))
     sys.stdout.flush(); os._exit(0)  # skip onnxruntime teardown
@@ -98,8 +103,14 @@ def main():
     cfg = store.load_config()
     if a.cmd == "learn":
         return learn(cfg)
-    if cfg.get("context", {}).get("enabled", True) and cfg["llm"].get("provider", "openai") != "openai":
-        log.warning("[context] enabled with a remote LLM provider: text around your cursor is sent to it")
+    if os.name == "nt":
+        from . import win
+        if not win.single_instance():  # tray app only: learn, --settings and --selftest return before this
+            return
+    remote = cfg["llm"].get("provider", "openai") != "openai" or (
+        cfg["llm"].get("fallback") and cfg.get("llm_fallback", {}).get("provider", "openai") != "openai")
+    if cfg.get("context", {}).get("enabled", True) and remote:
+        log.warning("[context] enabled with a remote LLM provider (primary or fallback): text around your cursor is sent to it")
     from .app import tray_app
     tray_app(cfg, learn, boot)
 

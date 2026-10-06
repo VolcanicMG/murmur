@@ -123,14 +123,14 @@ class T(unittest.TestCase):
         self.assertEqual(a.get_header("X-api-key"), "k")
 
     def test_fit(self):
-        self.assertEqual(brain.fit("world", "hello"), " world")
-        self.assertEqual(brain.fit(" world", "hello "), "world")
+        self.assertEqual(brain.fit("world", "well hello to the"), " world")
+        self.assertEqual(brain.fit(" world", "well hello to the "), "world")
         self.assertEqual(brain.fit("World", ""), "World")
         self.assertEqual(brain.fit("World", "hi\n"), "World")
         self.assertEqual(brain.fit(".", "hello"), ".")
         self.assertEqual(brain.fit("we also fixed the login bug", "The deploy is done. "), "We also fixed the login bug")
         self.assertEqual(brain.fit("the deploy is done. we also fixed it", "The deploy is done. "), "We also fixed it")
-        self.assertEqual(brain.fit("bumped", "update: we"), " bumped")
+        self.assertEqual(brain.fit("bumped", "the update we all"), " bumped")
         for b, f, want in (("Hey team.", "We pushed", " We pushed"), ("update:", "we", " we"), ("hi,", "we", " we"),
                            ("Done!", "we", " We"), ("Done?", "ok", " Ok"), ('He said "', "hi", "hi"),
                            ('He said "hi"', "and", " and")):
@@ -139,8 +139,8 @@ class T(unittest.TestCase):
 
     def test_context_section(self):
         self.assertEqual(brain._context({}), "")
-        p = brain._context({"before": "We should ship", "after": "tomorrow.", "selected": "x"})
-        for s in ("«We should ship»", "«tomorrow.»", "REPLACE it: «x»", "lowercase"):
+        p = brain._context({"before": "We should ship it and", "after": "tomorrow.", "selected": "x"})
+        for s in ("«We should ship it and»", "«tomorrow.»", "REPLACE it: «x»", "lowercase"):
             self.assertIn(s, p)
         self.assertNotIn("new sentence", p)
         done = brain._context({"before": "It is done. "})
@@ -166,6 +166,160 @@ class T(unittest.TestCase):
         brain.rewrite(None, "write hi", {"cfg": {}})
         self.assertIn("Selected text:\nx", got[0])
         self.assertIn("No selection", got[1])
+
+    # ---- command, scratch and capitalisation fixes (real history rows)
+    def test_apply_scratch(self):
+        a = brain.apply_scratch
+        self.assertEqual(a("Um testing testing one two three um scratch that"), "")
+        self.assertEqual(a("Testing, testing, one, two, three. Uh hello, hello, uh scratch that. We need to continue focusing on the main focal point."),
+                         "Testing, testing, one, two, three. We need to continue focusing on the main focal point.")
+        self.assertEqual(a("Uh scratch that"), "")
+        self.assertEqual(a("A. B, scratch that. C."), "A. C.")
+        self.assertEqual(a("Scratch that. C."), "C.")
+        self.assertEqual(a("A. B, scratch that. C, scratch that. D."), "A. D.")
+        self.assertEqual(a("A. B. Um. scratch that last one. C."), "A. C.")
+        self.assertEqual(a("Tuesday works, scratch that, let's do Thursday."), "let's do Thursday.")
+        self.assertEqual(a("nothing to see"), "nothing to see")
+        self.assertTrue(brain.has_scratch("Delete that.") and not brain.has_scratch("scratching"))
+
+    def test_cues_in_ordinary_sentences_do_not_fire(self):
+        for t in ("I'll delete that file later.", "Don't scratch that itch.", "Never mind that noise, we ship today.",
+                  "Can you strike that clause from the contract?", "Did you delete that?", "I said never mind that."):
+            self.assertFalse(brain.has_scratch(t), t)
+            self.assertEqual(brain.apply_scratch(t), t)
+        self.assertEqual(brain.apply_scratch("Hello. Um delete that. Bye."), "Bye.")  # clause-opening cue still works
+        self.assertEqual(brain.apply_scratch("Hello. Never mind that, we go."), "we go.")
+
+    def test_scratch_does_not_treat_inner_dots_as_sentence_ends(self):  # D1
+        a = brain.apply_scratch
+        self.assertEqual(a("Deploy 0.44 now. Scratch that."), "")
+        self.assertEqual(a("See example.com today. Scratch that."), "")
+        self.assertEqual(a("Ship it. Deploy 0.44 now. Scratch that."), "Ship it.")
+        self.assertEqual(a("Version 0.44 is out, scratch that, 0.45 is out."), "0.45 is out.")
+        self.assertEqual(a("The 2.0 release ships. Never mind that."), "")
+        self.assertEqual(a("Mail a.b@example.com now. Hello there. Scratch that."), "Mail a.b@example.com now.")
+
+    def test_scratch_that_after_a_frame_word_is_ordinary_speech(self):  # D1b
+        for t in ("Don't scratch that.", "I told you to scratch that.", "Please do not scratch that", "We should just scratch that"):
+            self.assertFalse(brain.has_scratch(t), t)
+            self.assertEqual(brain.apply_scratch(t), t)
+        self.assertEqual(brain.apply_scratch("Um testing testing one two three um scratch that"), "")  # Ethan's row
+        self.assertFalse(brain.has_scratch("Tuesday works scratch that, let's do Thursday."))  # mid-transcript needs punctuation
+
+    def test_chunks_never_use_the_snippet_shortcut(self):  # PL2
+        brain._chat = lambda *a: "cleaned"
+        ctx = {"cfg": store.load_config(), "tone": "neutral"}
+        self.assertEqual(brain.clean_checked("insert sig", ctx), ("Best,\nEthan", True))
+        text, _ = brain.clean_checked("insert sig", ctx, shortcut=False)
+        self.assertNotEqual(text, "Best,\nEthan")
+
+    def test_command_intent(self):
+        ci = brain.command_intent
+        self.assertEqual(ci("Uh scratch that"), ("undo", None))
+        self.assertEqual(ci("Scratch that last one."), ("undo", None))
+        self.assertEqual(ci("Um scratch that last one. Um instead of doing a we need X."), ("scratch", "instead of doing a we need X."))
+        self.assertEqual(ci("Scratch that. Um let's do anything I would change currently."), ("scratch", "let's do anything I would change currently."))
+        self.assertEqual(ci("Add this word to the dictionary."), ("learn", None))
+        self.assertEqual(ci("save that term in my dictionary"), ("learn", None))
+        self.assertEqual(ci("learn this word"), ("learn", None))
+        self.assertEqual(ci("Add Toung to the dictionary."), ("learn", "Toung"))
+        self.assertEqual(ci("add the cat to the dictionary")[0], "rewrite")
+        self.assertEqual(ci("make it formal"), ("rewrite", "make it formal"))
+        self.assertEqual(ci("delete that paragraph"), ("rewrite", "delete that paragraph"))
+        self.assertEqual(ci("strike that word"), ("rewrite", "strike that word"))
+        self.assertEqual(ci("Scratch that last one. Instead we go."), ("scratch", "Instead we go."))
+        self.assertEqual(ci("Delete that."), ("undo", None))
+        # R7: dictionary intents only where unambiguous
+        self.assertEqual(ci("add this word to the dictionary"), ("learn", None))
+        self.assertEqual(ci("add it to the dictionary")[0], "rewrite")  # no noun: needs "my dictionary"
+        self.assertEqual(ci("add it to my dictionary"), ("learn", None))
+        self.assertEqual(ci("add it to murmur's dictionary"), ("learn", None))
+        self.assertEqual(ci("add bananas to the dictionary", has_selection=True)[0], "rewrite")  # a selected dict literal
+        self.assertEqual(ci("add these to my dictionary")[0], "rewrite")
+        self.assertEqual(ci("add bananas to the dictionary", tone="code")[0], "rewrite")
+        self.assertEqual(ci("add bananas to my dictionary", tone="code"), ("learn", "bananas"))
+
+    def test_resolve_target(self):
+        rt, now = brain.resolve_target, 1000.0
+        lp = (now - 30, "code.exe", "I think this is working. ")
+        before = "x\r\nI think this is working.\r\n"
+        self.assertEqual(rt((True, "pick"), before, lp, ("code.exe", now)), ("selection", "pick"))
+        self.assertEqual(rt((True, ""), before, lp, ("code.exe", now)), ("last", "I think this is working."))
+        self.assertEqual(rt((True, ""), before, lp, ("slack.exe", now)), ("new", ""))  # other app
+        self.assertEqual(rt((True, ""), before, (now - 601, "code.exe", lp[2]), ("code.exe", now)), ("new", ""))  # too old
+        self.assertEqual(rt((True, ""), "I think this is working. And more", lp, ("code.exe", now)), ("new", ""))  # moved on
+        self.assertEqual(rt((True, ""), "", lp, ("code.exe", now)), ("new", ""))  # before unavailable: no guess
+        self.assertEqual(rt((False, ""), before, lp, ("code.exe", now)), ("new", ""))  # no TextPattern: no guess
+        self.assertEqual(rt((True, ""), before, (0.0, "", ""), ("code.exe", now)), ("new", ""))
+        self.assertEqual(rt((False, "clip"), "", lp, ("code.exe", now)), ("selection", "clip"))  # clipboard fallback result
+
+    def test_rewrite_last_prompt(self):
+        seen = []
+        brain._chat = lambda cfg, system, user: seen.append(user) or "fixed"
+        ctx = {"cfg": store.load_config(), "tone": "code"}
+        self.assertEqual(brain.rewrite("Hello there.", "change there to world", ctx, "last"), "fixed")
+        self.assertIn("what the user just dictated", seen[0])
+        self.assertIn("Hello there.", seen[0])
+        self.assertIn("change there to world", seen[0])
+        brain.rewrite("Hello there.", "make it formal", ctx)
+        self.assertTrue(seen[1].startswith("Selected text:"))
+
+    def test_continuation_and_fit(self):
+        c = brain.continuation
+        self.assertEqual(c(""), "new")
+        self.assertEqual(c("Message @someone"), "new")
+        self.assertEqual(c("We shipped it and"), "mid")
+        self.assertEqual(c("const x = foo"), "new")
+        self.assertEqual(c("this is a code_thing here and some_var"), "new")
+        self.assertEqual(c("Hello,"), "mid")
+        self.assertEqual(c("Done.\n"), "new")
+        self.assertEqual(c("Done."), "new")
+        self.assertEqual(c('She said "We are done."'), "new")  # closing quote after a finished sentence
+        self.assertEqual(c("(see the note)"), "new")
+        self.assertEqual(c('She said "'), "mid")
+        self.assertEqual(c("say \u201chello"), "new")  # curly quote is not in the opener set
+        self.assertEqual(brain.fit("what's your schedule?", ""), "What's your schedule?")
+        self.assertEqual(brain.fit("what's your schedule?", "Message @someone"), " What's your schedule?")
+        self.assertEqual(brain.fit("and then we left", "We shipped it and"), " and then we left")  # mid keeps the LLM's casing
+        self.assertEqual(brain.fit("echo hello", "", "code"), "echo hello")  # terminal: before unknown in code tone
+        self.assertEqual(brain.fit("vim app.py", "", "code"), "vim app.py")
+        self.assertEqual(brain.fit("testing testing one two three", "", "casual"), "Testing testing one two three")
+        self.assertEqual(brain.fit("we left", 'She said "We are done."', "code"), ' We left')  # known before still capitalises
+        self.assertEqual(brain.fit("- item", ""), "- Item")
+        self.assertEqual(brain.fit("1. item", ""), "1. Item")
+        self.assertEqual(brain.fit("my_var is set", ""), "my_var is set")
+        self.assertEqual(brain.fit("--force now", ""), "--force now")
+        self.assertEqual(brain.fit("app.py is it", ""), "app.py is it")
+        self.assertEqual(brain.tidy_raw("hello there"), "Hello there.")
+
+    def test_split_chunks_and_clean_auto(self):
+        text = " ".join(f"Sentence number {i} is here." for i in range(120))
+        chunks = brain.split_chunks(text, 1200)
+        self.assertEqual(len(chunks), 3)
+        self.assertTrue(all(len(c) <= 1200 for c in chunks) and " ".join(chunks) == text)
+        self.assertEqual(brain.split_chunks("short one."), ["short one."])
+        self.assertEqual(brain.split_chunks("a" * 30 + " " + "b" * 30, 40), ["a" * 30, "b" * 30])
+        calls = []
+
+        def chat(cfg, system, user):
+            calls.append((system, user))
+            return user.split('"""\n', 1)[1].rsplit('\n"""', 1)[0].upper()  # a faithful cleanup: shout it back
+        brain._chat = chat
+        out, ok = brain.clean_auto(text, {"cfg": store.load_config(), "tone": "neutral", "before": "Intro: "})
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(ok)
+        self.assertEqual(out, " ".join(c.upper() for c in chunks))  # one joined result
+        self.assertIn("Intro: ", calls[0][0])  # first chunk sees the real before
+        self.assertIn(chunks[0].upper()[-60:], calls[1][0])  # later chunks see the previous cleaned tail
+        self.assertNotIn("Intro:", calls[1][0])
+
+    def test_clean_auto_rejected_chunk_falls_back_to_tidy_raw(self):
+        text = " ".join(f"Sentence number {i} is here." for i in range(120))
+        seq = iter(["Totally unrelated invented content about elephants and tractors.", "ok1", "ok2"])
+        brain._chat = lambda *a: next(seq, "Totally unrelated invented content about elephants and tractors.")
+        out, ok = brain.clean_auto(text, {"cfg": store.load_config(), "tone": "neutral"})
+        self.assertFalse(ok)
+        self.assertIn("Sentence number 0 is here.", out)  # chunk 1 kept its own words
 
 
 if __name__ == "__main__":

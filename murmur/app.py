@@ -2,12 +2,12 @@
 import logging, os, threading, time
 from types import SimpleNamespace
 import keyboard, pystray
-from . import brain, card, context, settings, store, win
+from . import brain, capture, card, context, cues, settings, store, win
 from .session import Session
 from .tray import TOOLTIPS, tray_image
 
 log = logging.getLogger("murmur")
-S = {"mode": None, "held": False, "paused": False, "sid": 0, "last_paste": (0.0, ""), "capturing": False, "ready": False, "session": None}  # shared hotkey/session state
+S = {"mode": None, "held": False, "paused": False, "sid": 0, "last_paste": (0.0, "", ""), "capturing": False, "ready": False, "session": None, "g": ("idle", 0.0), "dropped": False}  # shared hotkey/session state
 _learn_lock = threading.Lock()  # a double press must not race copy_selection (clipboard)
 
 
@@ -17,16 +17,19 @@ def _hooks(sid, mark, retry):
 
     def stop():
         S["held"] = False
+        S["g"] = capture.gesture(S["g"], "stop", time.monotonic())[0]  # Esc/Enter/silence ended it: forget a latch
 
     def current():
         return S["sid"] == sid
 
     def done():
         S["mode"] = None; S["session"] = None
+        if S["g"][0] == "latched":
+            S["g"] = ("idle", 0.0)
 
-    def pasted(app):
-        """Record a paste into `app`; None clears it."""
-        S["last_paste"] = (time.time(), app) if app else (0.0, "")
+    def pasted(app, text=""):
+        """Record a paste of `text` into `app`; None clears it."""
+        S["last_paste"] = (time.time(), app, text) if app else (0.0, "", "")
 
     def last_paste():
         return S["last_paste"]
@@ -49,8 +52,25 @@ def probe_mic(cfg, ov):
     threading.Thread(target=run, daemon=True).start()
 
 
+def _tap_ms(cfg):
+    """Tap-to-latch window in ms; 0 when [dictation] toggle is off (hold-only)."""
+    d = cfg.get("dictation", {})
+    return d.get("tap_ms", 300) if d.get("toggle", True) else 0
+
+
 def press(mode, cfg, ov, mark):
+    log.info("hotkey %s press (mode=%s ready=%s capturing=%s)", mode, S["mode"], S["ready"], S["capturing"])
+    if mode == "dictate":
+        if capture.stale(S["g"], time.monotonic(), bool(S["session"])):
+            S["g"] = ("idle", 0.0)  # a release was missed: don't leave the dictate key dead
+        S["g"], action = capture.gesture(S["g"], "press", time.monotonic(), _tap_ms(cfg))
+        if action == "stop":  # second tap ends a hands-free session; this press must not start a new one
+            S["held"] = False
+        if action != "start":
+            return
     if S["mode"] or S["paused"] or S["capturing"] or not S["ready"]:
+        if mode == "dictate":
+            S["g"] = ("idle", 0.0)
         return
     S.update(mode=mode, held=True, sid=S["sid"] + 1)
     if mode == "command":
@@ -60,7 +80,24 @@ def press(mode, cfg, ov, mark):
     threading.Thread(target=sess.run, daemon=True).start()
 
 
-def release(mode):
+def other_key(event, dictate_key, cfg=None):
+    """Global non-suppressing hook: any other key going down while the dictate key is held marks a chord."""
+    if event.event_type == "down" and S["g"][0] == "down" and not store.key_matches(event.name, dictate_key):
+        S["g"] = capture.gesture(S["g"], "other", time.monotonic(), _tap_ms(cfg or {}))[0]
+
+
+def release(mode, cfg=None):
+    if mode == "dictate":
+        S["g"], action = capture.gesture(S["g"], "release", time.monotonic(), _tap_ms(cfg or {}))
+        if action == "latch" and S["session"] and S["mode"] == "dictate":
+            S["session"].latch()  # tap: keep recording hands-free
+        elif action == "latch":
+            S["g"] = ("idle", 0.0)
+        elif action == "stop" and S["mode"] == "dictate":
+            S["held"] = False
+        elif action == "cancel" and S["session"] and S["mode"] == "dictate":
+            S["session"].discard()  # a chord (e.g. right ctrl + c), not dictation: drop it silently
+        return
     if S["mode"] == mode:
         S["held"] = False
 
@@ -94,35 +131,52 @@ def _selection(cfg, app):
     t.start(); t.join(1.0)
     if got.get("selected"):
         return got["selected"].strip()
-    if app in store.no_copy(cfg):
+    if got.get("sel_known") or app in store.no_copy(cfg):  # UIA's empty selection is authoritative; VS Code's ctrl+c copies the line
         return ""
     for _ in range(20):  # the hotkey's modifiers must be up or ctrl+c becomes ctrl+alt+c
         if not (keyboard.is_pressed("ctrl") or keyboard.is_pressed("alt")):
-            break
+            return (win.copy_selection() or "").strip()
         time.sleep(0.05)
-    return (win.copy_selection() or "").strip()
+    return None  # still held: never send ctrl+c
 
 
 def _learn_word(cfg, ov):
     if not _learn_lock.acquire(blocking=False):
         return
     try:
-        text = brain.clean_word(_selection(cfg, win.active_app()[0]))
+        for _ in range(20):  # wait for a cancelled session to release the card, or its Learned flash would be skipped
+            if not S["session"] or not S["dropped"]:
+                break
+            time.sleep(0.05)
+        got = _selection(cfg, win.active_app()[0])
+        text = None if got is None else brain.clean_word(got)
     finally:
         _learn_lock.release()
-    if not text:
+    log.info("learn_word: selection %r", text)
+    if text is None:
+        flash = ("nothing", "Release the keys and try again.", "Keys held")
+    elif not text:
         flash = ("nothing", "Select a word first, then press the hotkey.", "Nothing selected")
     elif len(text.split()) > 4:
         flash = ("nothing", "Select 1\u20134 words to add to your dictionary.", "Too long")
     else:
         store.add_terms([text]); log.info("learned word: %s", text)
         flash = ("learned", f"\u201c{text}\u201d added to your dictionary", None)
+    if S["session"] and not S["dropped"]:  # a live dictation keeps the card (flash is skipped): give audible feedback instead
+        log.info("learn_word during a live session: %s", flash[0])
+        cues.play("done" if flash[0] == "learned" else "cancel", cfg)
     ov.post(lambda: ov.flash(*flash))
 
 
 def learn_word(cfg, ov):
+    log.info("hotkey learn_word fired (capturing=%s)", S["capturing"])
     if S["capturing"]:
         return
+    s = S["session"]
+    young = s and (time.time() - getattr(s, "t0", time.time()) < 0.3 or not s.vad["speech"])
+    S["dropped"] = bool(young)
+    if young:  # a chord that just started a session (or one with no speech yet) is dropped silently so the card can show
+        s.discard()
     threading.Thread(target=_learn_word, args=(cfg, ov), daemon=True).start()  # off the hook thread
 
 
@@ -155,9 +209,10 @@ def tray_app(cfg, learn, boot):
 
     for mode, key in keys.items():
         keyboard.on_press_key(key, lambda e, m=mode, k=key: store.key_matches(e.name, k) and press(m, cfg, ov, mark))
-        keyboard.on_release_key(key, lambda e, m=mode, k=key: store.key_matches(e.name, k) and release(m))
-    keyboard.add_hotkey(hk["fix_last"], lambda: ov.post(lambda: fix_newest(ov.root)))
-    keyboard.add_hotkey(learn_key, lambda: learn_word(cfg, ov), trigger_on_release=True)
+        keyboard.on_release_key(key, lambda e, m=mode, k=key: store.key_matches(e.name, k) and release(m, cfg))
+    keyboard.hook(lambda e: other_key(e, keys["dictate"], cfg))
+    keyboard.add_hotkey(hk["fix_last"], lambda: (log.info("hotkey fix_last fired"), ov.post(lambda: fix_newest(ov.root))))
+    keyboard.add_hotkey(learn_key, lambda: learn_word(cfg, ov))  # fires on press; trigger_on_release never fired in the keyboard lib
 
     def toggle(i, it):
         S["paused"] = not S["paused"]

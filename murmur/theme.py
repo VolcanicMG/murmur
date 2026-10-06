@@ -42,3 +42,6 @@ def pick_fonts(families):
     first = lambda names, fb: next((f for f in names if f in families), fb)
     ui = first(UI_FONTS, "TkDefaultFont")
     return ui, first(SEMI_FONTS, ui), first(MONO_FONTS, "TkFixedFont")
+
+
+HAIR, FIELD, SIDEBAR, SEL, INPUT = on_fill(0.10), on_fill(0.04), on_fill(0.03), blend(ACCENT, FILL, 0.30), on_fill(0.08)  # settings surfaces
