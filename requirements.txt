@@ -8,3 +8,5 @@ pywin32==312
 numpy==2.5.3
 huggingface-hub==2.1.1
 pillow==12.3.0
+uiautomation==2.0.29
+comtypes==1.4.17
