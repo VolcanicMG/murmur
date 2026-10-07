@@ -93,7 +93,7 @@ def is_private(cfg=None):
 
 def exclude_current(cfg=None):
     """Toggle the last foreground app in [apps] exclude and save the config. Returns True if it is now excluded, None if
-    there is no app to toggle. The tray item: "Don't use murmur in <last_foreground()>", checked = exclude_current's result."""
+    there is no app to toggle. Reached from the card's right-click menu ("Don't use murmur in <last_foreground()>")."""
     cfg, app = _cfg(cfg), last_foreground()
     if not app:
         return None
@@ -344,13 +344,14 @@ def _track_foreground():
 
 
 def tray_app(cfg, learn, boot, first_run=False):
-    """boot(cfg) loads the speech model and warms the LLM; it runs on a thread while the loading card shows."""
+    """boot(cfg, progress) loads the speech model and warms the LLM; it runs on a thread while the loading card shows its steps."""
     ov = card.Card()
 
     def mark(state):
         _set_icon(icon, state, S["keys"]["dictate"])
     S["keys"], learn_key, removers = _register(cfg, ov, mark)
     _bound.update(ov=ov, mark=mark, removers=removers, learn_key=learn_key, cfg=cfg)
+    ov.exclude_hook = (last_foreground, exclude_current)  # right-click on the card: "Don't use murmur in <app>"
     _track_foreground()
     keys = S["keys"]
 
@@ -363,7 +364,7 @@ def tray_app(cfg, learn, boot, first_run=False):
     menu = pystray.Menu(
         pystray.MenuItem("Settings\u2026", lambda i, it: open_settings(), default=True),
         pystray.MenuItem(lambda it: "Resume dictation" if S["paused"] else "Pause dictation", toggle, checked=lambda it: S["paused"]),
-        *tray.extra_items(sys.modules[__name__], lambda i, it: open_settings(page="About")),  # Private mode, Don't use murmur in this app, About
+        *tray.extra_items(sys.modules[__name__], lambda i, it: open_settings(page="About")),  # Private mode, About
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Open config folder", lambda i, it: os.startfile(store.HOME)),
         pystray.MenuItem("Learn style", lambda i, it: threading.Thread(target=learn, args=(cfg,), daemon=True).start()),
@@ -381,7 +382,7 @@ def tray_app(cfg, learn, boot, first_run=False):
 
     def start():
         try:
-            boot(cfg)
+            boot(cfg, lambda frac, text: ov.post(lambda: ov.progress(frac, text)))
         except Exception:
             log.exception("startup failed")
             ov.post(lambda: ov.flash("failed"))

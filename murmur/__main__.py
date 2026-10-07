@@ -74,16 +74,21 @@ def start_llm(cfg):
         log.info("llm warmup failed: %s", e)
 
 
-def boot(cfg):
-    """Load the speech model (first run downloads ~600 MB) and make sure the LLM is up."""
-    log.info("loading speech model (the first run downloads ~600 MB, one time)")
+def boot(cfg, progress=lambda frac, text: None):
+    """Load the speech model (bundled with the build) and make sure the LLM is up. progress(frac 0..1, step text) drives the
+    loading card; the fractions are the steps' typical share of a ~2 s start."""
+    progress(0.05, "Loading speech model\u2026")
+    log.info("loading speech model from %s", stt.model_dir() if stt.model_dir().is_dir() else "the Hugging Face cache")
     stt.load_model(cfg)
+    progress(0.7, "Preparing window access\u2026")
     try:
         import comtypes.client
         comtypes.client.GetModule("oleacc.dll")  # warm the MSAA typelib so the first dictation doesn't pay for it
     except Exception as e:
         log.info("oleacc warm-up failed: %s", e)
+    progress(0.85, "Starting cleanup model\u2026")
     start_llm(cfg)
+    progress(1.0, "Ready")
 
 
 def selftest(real=False):
@@ -122,7 +127,8 @@ def main():
         from . import win
         win.dpi_aware()  # before any window exists
     ap = argparse.ArgumentParser(prog="murmur", description="Local voice dictation")
-    ap.add_argument("cmd", nargs="?", choices=["learn"], help="learn: rebuild style.md from history")
+    ap.add_argument("cmd", nargs="?", choices=["learn", "fetch-model"], help="learn: rebuild style.md from history; fetch-model: download the speech model into the build folder")
+    ap.add_argument("dest", nargs="?", help="with fetch-model: target folder (default packaging/models/parakeet)")
     ap.add_argument("--settings", nargs="?", const="History", metavar="TAB", help="open the settings window only (optionally on TAB)")
     ap.add_argument("--demo-card", nargs="?", const="", metavar="STATE", help="show the caption card with fake data (cycles states, or freezes STATE)")
     ap.add_argument("--demo-tray", metavar="STATE", help="save the tray icon for STATE to ~/.murmur/shots/")
@@ -134,6 +140,8 @@ def main():
     if a.version:
         from . import __version__
         print(__version__); return
+    if a.cmd == "fetch-model":  # build step: no ~/.murmur needed
+        print(stt.fetch(a.dest)); return
     first_run = store.ensure()  # True when config.toml did not exist: the tray app opens the setup window once
     if a.selftest:
         return selftest(a.real)

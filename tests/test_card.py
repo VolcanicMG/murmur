@@ -21,6 +21,10 @@ class T(unittest.TestCase):
         self.assertTrue(all(abs(h - 2) < 1e-9 for h in quiet))
         self.assertTrue(all(h < 3 for h in card.bar_heights(0.9, 5, "flat", n)))
         self.assertGreater(max(card.bar_heights(0, 700, "wave", n)), 4)
+        half = card.bar_heights(0.5, 0, "progress", n)  # loading bar: the done half stands, the rest is flat
+        self.assertTrue(all(h > 3 for h in half[:n // 2]) and all(abs(h - 2) < 1e-9 for h in half[n // 2:]))
+        self.assertEqual(card.STATES["loading"][3], "progress")
+        self.assertNotIn("600 MB", card.STATES["loading"][7])  # the model ships with the build
 
     def test_norm_level(self):
         self.assertEqual(card.norm_level(0), 0)
@@ -107,3 +111,24 @@ class T(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelDir(unittest.TestCase):
+    def test_bundled_model_dir_and_fetch_dest(self):
+        import types
+        fake = types.ModuleType("onnx_asr"); calls = []
+        fake.load_model = lambda name, path=None, quantization=None: calls.append((name, path, quantization))
+        saved = sys.modules.get("onnx_asr"); sys.modules["onnx_asr"] = fake
+        sys.modules.pop("murmur.stt", None)
+        try:
+            from murmur import stt
+            self.assertEqual(stt.model_dir().parts[-3:], ("packaging", "models", "parakeet"))
+            stt.load_model({"stt": {"model": stt.DEFAULT_MODEL, "quantization": stt.DEFAULT_QUANT}})
+            self.assertEqual(calls[-1], (stt.DEFAULT_MODEL, stt.model_dir() if stt.model_dir().is_dir() else None, "int8"))
+            stt.load_model({"stt": {"model": "other", "quantization": "int8"}})
+            self.assertIsNone(calls[-1][1])  # a non-default model never reads the bundled folder
+            self.assertEqual(stt.fetch("/tmp/x").name, "x"); self.assertEqual(str(calls[-1][1]), "/tmp/x")
+        finally:
+            sys.modules.pop("murmur.stt", None)
+            if saved: sys.modules["onnx_asr"] = saved
+            else: sys.modules.pop("onnx_asr", None)

@@ -8,3 +8,4 @@ dist/
 evals/cases/local/
 evals/results/*
 !evals/results/.gitkeep
+packaging/models/

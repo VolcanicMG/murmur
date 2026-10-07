@@ -24,8 +24,7 @@ STATES = {
     "done": ("Done", SUCCESS, TEXT, "flat", False, False, 1600, "", False),
     "error": ("No microphone", ERROR, ERR_TEXT, "grey", False, True, 8000,
               "No microphone detected. Plug one in or pick another input in Settings.", False),
-    "loading": ("Loading model", SECONDARY, TEXT, "grey", False, False, None,
-                "First run downloads the speech model (~600 MB)\u2026", False),
+    "loading": ("Starting", ACCENT, TEXT, "progress", False, False, None, "Loading speech model\u2026", False),
     "offline": ("Model offline", ERROR, TEXT, "grey", False, False, 2400,
                 "Pasted the raw transcript; cleanup unavailable.", False),
     "paste_failed": ("Couldn't paste", ERROR, TEXT, "grey", False, False, 2800,
@@ -43,12 +42,15 @@ def envelope(i, n=64):
 
 
 def bar_heights(level, t_ms, kind, n=64, span=(2.0, 28.0)):
-    """Waveform bar heights. kinds: live (speech-driven), wave (travelling, polishing), flat/grey (idle)."""
+    """Waveform bar heights. kinds: live (speech-driven), wave (travelling, polishing), flat/grey (idle),
+    progress (level = fraction done: bars left of it stand up, the rest stay flat)."""
     lo, hi = span
     out = []
     for i in range(n):
         env = envelope(i, n)
-        if kind == "wave":
+        if kind == "progress":
+            h = lo + 0.45 * hi * max(env, 0.25) if (i + 0.5) / n <= level else lo  # floor: the first bars must read as "done"
+        elif kind == "wave":
             h = lo + hi * 0.45 * max(0.0, math.sin(i * 0.45 - t_ms / 90)) * env
         elif kind in ("flat", "grey"):
             h = lo + 0.5 * env
@@ -133,6 +135,7 @@ class Card:
         self.tail_up, self.card_x, self.kind = False, 0, "caret"
         self.st, self.text, self.interim, self.field, self.dest, self.label_o = "listening", "", "", None, "", None
         self.lvl, self._t_last, self._anim = 0.0, time.monotonic(), None  # smoothed level; ("in"|"out", t0)
+        self.prog, self.prog_cap, self.exclude_hook = 0.0, 0.0, None  # loading progress (creeps toward the cap while a step runs); (app_fn, toggle_fn)
         self._col_from, self._col_t0, self._dismiss_id, self._geom, self.level_fn = ACCENT, 0.0, None, "", None
         self.root = r = tk.Tk()
         r.title("murmur card"); r.overrideredirect(True)
@@ -149,7 +152,7 @@ class Card:
                 from .layered import Layered
                 self.lw, self.p, self._view = Layered(win32_hwnd(r)), Painter(self.s), View
                 self.pad, self.layered = self.p.pad, True
-                r.bind("<Button-1>", self._click)
+                r.bind("<Button-1>", self._click); r.bind("<Button-3>", self._rclick)
             except Exception:
                 log.exception("layered card window unavailable, using the chroma-key renderer")
         if not self.layered:
@@ -162,7 +165,7 @@ class Card:
         r.attributes("-alpha", 0.0, "-transparentcolor", KEY)
         r.configure(bg=KEY)
         self.c = tk.Canvas(r, bg=KEY, highlightthickness=0, bd=0)
-        self.c.pack(fill="both", expand=True); self.c.bind("<Button-1>", self._click)
+        self.c.pack(fill="both", expand=True); self.c.bind("<Button-1>", self._click); self.c.bind("<Button-3>", self._rclick)
         ui, semi, mono = pick_fonts(set(tkfont.families()))
         px = lambda n: -round(n * self.s)
         self.f = {"body": tkfont.Font(family=ui, size=px(18)), "chip": tkfont.Font(family=semi, size=px(12.5)),
@@ -227,6 +230,35 @@ class Card:
             self.text = text
         self._set_state(name, fade=False, label=label)
         self._appear()
+
+    def progress(self, frac, text):
+        """Loading card step: bars fill to `frac` (then creep toward the next step's share), `text` names the step."""
+        self.prog_cap, self.text = frac, text
+        if frac >= 1.0:
+            self.prog = 1.0
+        if self.st != "loading":
+            self.flash("loading", text)
+
+    def _rclick(self, e):
+        """Right-click: native popup "Don't use murmur in <app>" for the app in front. exclude_hook = (app_fn -> process name
+        or '', toggle_fn -> now excluded?); the live session (if any) is cancelled through its Escape handler."""
+        if not self.exclude_hook or not (app := self.exclude_hook[0]()):
+            return
+        import tkinter as tk
+
+        def pick():
+            on = self.exclude_hook[1]()
+            if self.recording and (cancel := self.handlers.get("cancel")):
+                cancel()  # posts hide; the notice below lands after it
+
+            def notice():
+                self.recording = False
+                self.flash("done" if on else "undone", f"murmur is off in {app}. Turn it back on in Settings \u203a Config." if on
+                           else f"murmur is back on in {app}.", label="Excluded" if on else "Included")
+            self.root.after(250, notice)
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=f"Don't use murmur in {app}", command=pick)
+        m.tk_popup(e.x_root, e.y_root)
 
     def release(self):
         """The session is over: keep the card if its state dismisses itself, otherwise hide."""
@@ -343,7 +375,10 @@ class Card:
         now = time.monotonic()
         dt, self._t_last = now - self._t_last, now
         raw = self.level_fn(now) if self.level_fn else self.level
-        tgt = norm_level(raw) if STATES[self.st][3] == "live" else 0.0
+        kind = STATES[self.st][3]
+        if kind == "progress":
+            self.prog = min(self.prog_cap, self.prog + dt * 0.12)  # a long step still looks alive
+        tgt = norm_level(raw) if kind == "live" else self.prog if kind == "progress" else 0.0
         if self.st == "listening":
             tgt = max(tgt, 0.1 + 0.05 * abs(math.sin(now * 5.5)))  # idle wobble until speech arrives
         tau = 0.08 if tgt > self.lvl else 0.2
@@ -509,11 +544,13 @@ class Card:
         fy, x0, x1 = row
         n = 64
         bw = max(1.0, (x1 - x0 - 2 * (n - 1)) / n)
-        color = blend(WHITE, FILL, 0.22) if kind == "grey" else col
+        dim = blend(WHITE, FILL, 0.22)
+        color = dim if kind == "grey" else col
         for i, h in enumerate(bar_heights(self.lvl, now * 1000, kind, n)):
             x = x0 + i * (bw + 2) + bw / 2
             half = max(0.0, h / 2 - bw / 2)
-            self.c.create_line(x, fy - half, x, fy + half + 0.01, width=bw * self.s, fill=color, capstyle="round")
+            c = dim if kind == "progress" and (i + 0.5) / n > self.lvl else color
+            self.c.create_line(x, fy - half, x, fy + half + 0.01, width=bw * self.s, fill=c, capstyle="round")
 
 
 def demo(state=None):
@@ -534,6 +571,7 @@ def demo(state=None):
         text, interim = sample.get(name, ("", ""))
         c.state(name, text); c.transcript(text, interim)
         c._cancel_dismiss()  # demo holds each state
+        c.prog, c.prog_cap = 0.0, 1.0  # loading: the bar creeps to full
 
     def bench():  # composition + UpdateLayeredWindow time over the first 200 frames, written next to the screenshots
         if len(c._ms) < 200:

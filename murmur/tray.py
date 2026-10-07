@@ -63,15 +63,13 @@ def tooltip(state, key, private=False):
 
 def extra_items(app, open_about=None):
     """pystray MenuItems for the logic worker's tray hooks, to splice into the menu (`*tray.extra_items(app_module, cb)`).
-    Each item exists only when `app` has the callable: toggle_private() (+ optional is_private()), exclude_current(). open_about(icon, item)
-    adds "About murmur"."""
+    Each item exists only when `app` has the callable: toggle_private() (+ optional is_private()). open_about(icon, item) adds
+    "About murmur". (Excluding an app lives on the card's right-click menu, where the target app is known, and in Settings > Config.)"""
     import pystray
     items = []
-    toggle, is_private, exclude = (getattr(app, n, None) for n in ("toggle_private", "is_private", "exclude_current"))
+    toggle, is_private = (getattr(app, n, None) for n in ("toggle_private", "is_private"))
     if toggle:
         items.append(pystray.MenuItem("Private mode", lambda i, it: toggle(), checked=(lambda it: bool(is_private())) if is_private else None))
-    if exclude:
-        items.append(pystray.MenuItem("Don't use murmur in this app", lambda i, it: exclude()))
     if open_about:
         items.append(pystray.MenuItem("About murmur", open_about))
     return items

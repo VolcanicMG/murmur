@@ -86,6 +86,9 @@ class Painter:
         stat = _cap(self._stat, (lay.ch, lay.hints, lay.retry, lay.kind, v.label, v.dest, v.up, round(v.tcx)), lambda: self._static(lay, v), 16)
         self.retry_box = stat.retry_box
         bar_col = (WHITE, 0.22) if lay.kind == "grey" else v.col
+        if lay.kind == "progress":  # two-tone: done bars in the state colour, the rest dim
+            lit = round(v.lvl * 64)
+            bar_col = (v.col,) * lit + ((WHITE, 0.22),) * (64 - lit)
         hs = tuple(max(1, round(h * self.s)) for h in bar_heights(v.lvl, v.now * 1000, lay.kind, 64))
         pq = round((0.75 + 0.15 * math.sin(v.now * 2 * math.pi / 0.9)) * 20) / 20 if lay.name == "polishing" else 1.0
         halo = round(k(8) * (1 + v.lvl * 1.6)) // 2 * 2 if lay.kind == "live" else 0
@@ -103,14 +106,15 @@ class Painter:
         return f
 
     def _bars(self, f, span, hs, col):
-        """64 round-ended bars across span (x0, x1, centre y); heights in device px."""
+        """64 round-ended bars across span (x0, x1, centre y); heights in device px. col: one colour, or one per bar."""
         x0, x1, fy = span
         gap = self.k(2)
         pitch = (x1 - x0 + gap) / 64
+        per_bar = isinstance(col, tuple) and len(col) == 64  # a single colour is a hex string or (colour, alpha)
         for i, h in enumerate(hs):
             xa = round(x0 + i * pitch)
             w = max(1, round(x0 + i * pitch + pitch - gap) - xa)
-            f.alpha_composite(render.bar(w, h, col), (xa, fy - h // 2))
+            f.alpha_composite(render.bar(w, h, col[i] if per_bar else col), (xa, fy - h // 2))
 
     def _static(self, lay, v):
         """Everything that doesn't move with the mic level or the transcript."""

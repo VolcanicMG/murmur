@@ -723,7 +723,7 @@ def open_settings(root, cfg, fix=None, standalone=False, **where):
     where: start="History" | page="About" (same thing: the sidebar page to open on)."""
     ui = make_ui()
     s = ui.s
-    top = tk.Toplevel(root); top.title("murmur"); top.configure(bg=FILL); top.geometry(f"{round(880 * s)}x{round(600 * s)}")
+    top = tk.Toplevel(root); top.title("murmur"); top.configure(bg=FILL); top.geometry(f"{round(1080 * s)}x{round(760 * s)}")
     _style(top, ui)
     try:
         root.iconbitmap(default=str(icon_path()))  # also what the taskbar shows
