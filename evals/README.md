@@ -30,7 +30,7 @@ Table of pass rate per kind, median/p95 latency per LLM call, guard stats (rejec
 
 ## Speech model comparison
 
-`evals/live_script.md` is a reading script for the person; with `[audio] keep_recordings = 20` each take is saved to `~/.murmur/recordings/` (wav + the raw transcript). `python -m evals.stt_compare [MODEL...] [--ref lines.txt]` re-runs those takes through other onnx-asr models (default: shipped int8 v3, fp32 v3, int8 v2 English-only) and prints them side by side with a word error rate when `--ref` is given. Run it with the Windows venv python; models download to the HF cache.
+`evals/live_script.md` is a reading script for the person; with `[audio] keep_recordings = 20` each take is saved to `~/.murmur/recordings/` (wav + the raw transcript). `python -m evals.stt_compare [MODEL...] [--ref lines.txt]` re-runs those takes through other onnx-asr models (default: shipped int8 v2 English-only, int8 v3, fp32 v3), each on the take as recorded and after `audio.condition` (what the app feeds the model; `--no-condition` skips it), and prints them side by side with a word error rate per model and variant when `--ref` is given. Run it with the Windows venv python; models download to the HF cache.
 
 ## Privacy
 `evals/cases/local/` and `evals/results/` are gitignored: they contain your real dictations. Never copy local cases into `core.jsonl`, paste their text into issues/PRs/reports, or commit them. Only share aggregate numbers. `core.jsonl` holds non-sensitive text only.

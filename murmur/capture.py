@@ -37,6 +37,15 @@ def stale(state, now, session_alive, age=2.0):
     return state[0] != "idle" and not session_alive and now - state[1] > age
 
 
+MIN_SPEECH_S = 0.25  # a take with less detected speech than this and only a few words is the model inventing ("Yeah.")
+
+
+def hallucinated(raw, speech_s):
+    """Parakeet answers near-silence with a short filler ("Yeah.", "Yes.", "Thank you."). True when the VAD heard under
+    MIN_SPEECH_S of speech and the transcript is at most three words; longer output on a quiet mic is still kept."""
+    return bool(raw) and speech_s < MIN_SPEECH_S and len(raw.split()) <= 3
+
+
 def vad_new():
     return {"t": 0.0, "floor": [], "speech": False, "quiet_ms": 0.0, "speech_s": 0.0, "pauses": 0}
 

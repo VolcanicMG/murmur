@@ -602,9 +602,9 @@ def _dictation_card(B):
     _toggle_row(B, g, "ui.startup_toast", "Startup notification")
     _toggle_row(B, g, "dictation.toggle", "Tap to toggle (hands-free)")
     _number_row(B, g, "dictation.silence_ms", "Stop after silence (ms)")
-    _number_row(B, g, "audio.preroll_ms", "Pre-roll before the key (ms)"); _hint(B, g, "Keeps the mic open; 0 = open on key-down", k(60))
+    _number_row(B, g, "audio.preroll_ms", "Pre-roll before the key (ms)"); _hint(B, g, "> 0 keeps the mic running (shows as in use); 0 = warm, started on key-down", _num_w(B))
     _number_row(B, g, "dictation.tail_ms", "Tail after release (ms)")
-    _number_row(B, g, "audio.keep_recordings", "Keep last recordings"); _hint(B, g, "~/.murmur/recordings, for model comparisons; 0 = off", k(60))
+    _number_row(B, g, "audio.keep_recordings", "Keep last recordings"); _hint(B, g, "~/.murmur/recordings, for model comparisons; 0 = off", _num_w(B))
     _toggle_row(B, g, "ui.sounds", "Sounds")
     lab, _ = _toggle_row(B, g, "ui.start_sound", "Start sound")
     lab.config(padx=k(14)); _label(g, ui, "Plays when recording begins", "small", SECONDARY, FIELD).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(k(60), 0))
@@ -614,6 +614,11 @@ def _dictation_card(B):
     def play_test():
         cues.play("start", {"ui": {"sounds": True, "start_sound": True, "sound_volume": float(vol.get() or 0.25)}})
     Pill(g, ui, "Test", play_test).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(vol.px + k(8), 0))  # same cell as the Select: no third column to widen the card
+
+
+def _num_w(B):
+    """Hint offset that clears an 8-digit number field (entry width + 12 px inset each side + a gap)."""
+    return B.ui.fonts["body"].measure("0" * 8) + B.k(36)
 
 
 def _hint(B, g, text, offset):

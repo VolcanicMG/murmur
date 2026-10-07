@@ -135,7 +135,8 @@ def _save(cfg):
 
 
 def press(mode, cfg, ov, mark):
-    log.info("hotkey %s press (mode=%s ready=%s capturing=%s)", mode, S["mode"], S["ready"], S["capturing"])
+    if S["mode"] != mode:  # key auto-repeat fires this 30x/s while held: log only the press that can start something
+        log.info("hotkey %s press (mode=%s ready=%s capturing=%s)", mode, S["mode"], S["ready"], S["capturing"])
     if not S["session"] and _ignored(cfg):  # a live session may still be stopped by its own key
         return
     if mode == "dictate":
@@ -409,10 +410,9 @@ def tray_app(cfg, learn, boot, first_run=False):
             ov.post(lambda: ov.flash("failed"))
             return
         _purge_loop(cfg)
-        if store.preroll_s(cfg) > 0:
-            from . import mic
-            S["mic"] = mic.Monitor(lambda: mic.device_index(cfg), store.preroll_s(cfg))
-            S["mic"].start()
+        from . import mic
+        S["mic"] = mic.Monitor(lambda: mic.device_index(cfg), store.preroll_s(cfg))  # warm by default; pre-roll when configured
+        S["mic"].start()
         S["ready"] = True
         ov.post(lambda: ov.progress(1.0, f"Hold {keys['dictate']} to dictate."))  # the card finishes the bar, shows Ready and hides itself
         log.info("ready: hold %s to dictate, %s for commands, %s adds the selected word", keys["dictate"], keys["command"], learn_key)

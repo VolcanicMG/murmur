@@ -7,7 +7,7 @@ from pathlib import Path
 import onnx_asr
 
 _model = None
-DEFAULT_MODEL, DEFAULT_QUANT = "nemo-parakeet-tdt-0.6b-v3", "int8"
+DEFAULT_MODEL, DEFAULT_QUANT = "nemo-parakeet-tdt-0.6b-v2", "int8"  # v2 = English-only, lower English WER than the multilingual v3; int8 matches fp32
 
 
 def model_dir():

@@ -247,3 +247,38 @@ class Mic(unittest.TestCase):
         wavs = sorted((store.HOME / "recordings").glob("*.wav"))
         self.assertEqual(len(wavs), 2)
         self.assertEqual(wavs[-1].with_suffix(".txt").read_text(encoding="utf-8").strip(), "raw 3")
+
+
+class Hallucination(unittest.TestCase):
+    def test_short_output_on_silence_is_dropped(self):
+        self.assertTrue(capture.hallucinated("Yeah.", 0.0))
+        self.assertTrue(capture.hallucinated("Thank you.", 0.1))
+        self.assertFalse(capture.hallucinated("Yeah.", 0.6))  # real speech heard
+        self.assertFalse(capture.hallucinated("we can always adjust later", 0.0))  # quiet mic, real words: kept
+        self.assertFalse(capture.hallucinated("", 0.0))
+
+
+class Conditioning(unittest.TestCase):
+    def setUp(self):
+        self.np = _numpy_or_skip(self)
+        from murmur import audio
+        self.audio = audio
+
+    def tone(self, seconds, amp):
+        np = self.np
+        t = np.arange(int(16000 * seconds)) / 16000
+        return (amp * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+    def test_trim_pause_level_pad(self):
+        np, A = self.np, self.audio
+        quiet = (np.random.default_rng(0).standard_normal(16000 * 3) * 0.0005).astype(np.float32)  # 3 s of hiss
+        x = np.concatenate([quiet[:16000 * 2], self.tone(0.5, 0.02), quiet[:16000 * 3], self.tone(0.5, 0.02), quiet[:16000 * 2]])
+        y = A.condition(x)
+        # 2 s head + 3 s pause + 2 s tail shrink to 0.25 pad + ~0.25 + 1.0 pause + ~0.25 + 0.25 pad around 1 s of speech
+        self.assertLess(len(y) / 16000, 3.6); self.assertGreater(len(y) / 16000, 2.2)
+        self.assertTrue(np.all(y[: int(0.25 * 16000)] == 0))  # lead-in pad
+        self.assertGreater(np.abs(y).max(), 0.1)  # the -34 dBFS tone was boosted toward -20 dBFS
+        self.assertLessEqual(np.abs(y).max(), 1.0)  # soft limiter
+        self.assertEqual(len(A.condition(quiet)), len(quiet))  # silence: untouched
+        loud = self.tone(1.0, 0.5)
+        self.assertAlmostEqual(float(np.abs(A.condition(loud)).max()), 0.5, places=2)  # never lowered

@@ -308,6 +308,7 @@ class T(unittest.TestCase):
         self.assertEqual(q("he said open quote we are done close quote. Then left"), 'he said "we are done". Then left')
         self.assertEqual(q("quote hello, unquote, and more"), '"hello", and more')
         self.assertEqual(q("I will quote you on that"), "I will quote you on that")  # no closing cue: left alone
+        self.assertEqual(q("the thing was quote super quote cool"), 'the thing was "super" cool')  # bare second quote closes
         self.assertEqual(brain.spoken_forms("say quote forty two end quote now"), 'say "forty two" now')  # runs inside spoken_forms
 
     def test_spoken_breaks(self):  # E2

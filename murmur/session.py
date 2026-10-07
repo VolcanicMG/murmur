@@ -4,7 +4,7 @@ import keyboard
 from datetime import datetime
 import numpy as np
 import sounddevice as sd
-from . import mic, autolearn, brain, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
+from . import audio, mic, autolearn, brain, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
 
 log = logging.getLogger("murmur")
 UNDO_WINDOW = 60  # seconds after our last paste during which "scratch that" sends ctrl+z
@@ -18,7 +18,11 @@ def wait_cap(cfg, chunks):
 
 
 def transcribe(buf):
-    return stt.recognize(np.concatenate(buf)[:, 0]) if buf else ""
+    """Condition the take (trim/pauses/level/pad, see audio.py) and decode; an empty decode is retried on the untouched audio."""
+    if not buf:
+        return ""
+    x = np.concatenate(buf)[:, 0]
+    return stt.recognize(audio.condition(x)) or stt.recognize(x)
 
 
 class Session:
@@ -41,6 +45,7 @@ class Session:
         self.committed, self.tag_index, self.silent = "", None, False
         self.verdict, self._pw, self._unknown = context.Verdict(), None, False  # password verdict: published early, frozen at release
         self.rms, self.live_route, self.hint = [], "primary", ""  # per-block RMS aligned with buf (forced segment cuts); route of the live clean; the card hint
+        self.full = [] if cfg.get("audio", {}).get("keep_recordings", 0) else None  # every frame of the take, for keep_recordings (buf loses committed segments)
 
     def _cue(self, name):
         """Audio cue (async, honours [ui] sounds); never raises."""
@@ -85,8 +90,11 @@ class Session:
             if self.cancelled or time.time() - self.t0 < 0.3:
                 return
             self.raw = self._compose(transcribe(self.buf))
+            if self.raw and not self.committed and capture.hallucinated(self.raw, self.vad["speech_s"]):
+                log.info("dropped %r: %.2f s of speech detected", self.raw, self.vad["speech_s"])
+                self.raw = ""
             if not self.raw:
-                if self.vad_decision == "cancel":  # nothing was said: only now discard
+                if self.vad_decision == "cancel" or self.vad["speech_s"] < capture.MIN_SPEECH_S:  # nothing was said: only now discard
                     self._cue("cancel")
                     self._post(lambda: self.ov.state("nothing", "No speech heard.", label="No speech"))
                 return
@@ -171,6 +179,8 @@ class Session:
     def _audio(self, d, *_):
         rms = self.ov.level = float(np.sqrt(np.mean(d * d)))
         self.rms.append(rms)  # before buf, so rms is never shorter than buf
+        if self.full is not None:
+            self.full.append(d.copy())
         self.buf.append(d.copy())
         self.vad, decision = capture.vad_step(self.vad, rms, len(d) / 16000, self.cfg.get("dictation", {}))
         if decision and self.latched and not self.vad_decision:  # silence auto-stop is for hands-free sessions only
@@ -183,10 +193,12 @@ class Session:
     def _keep_audio(self):
         """[audio] keep_recordings > 0: save this recording (+ its raw transcript) for model comparisons. Never in private mode."""
         keep = self.cfg.get("audio", {}).get("keep_recordings", 0)
-        if not keep or store.is_private(self.cfg) or not self.buf:
+        if not keep or store.is_private(self.cfg) or not self.full:
             return
         try:
-            store.save_recording(np.concatenate(self.buf)[:, 0], self.raw, keep)
+            x = np.concatenate(self.full)[:, 0]
+            store.save_recording(x, self.raw, keep)
+            log.info("kept recording: %.1f s of audio for a %.1f s hold, raw=%r", len(x) / 16000, self.t_end - self.t0, self.raw)
         except Exception:
             log.exception("keeping the recording failed")
 

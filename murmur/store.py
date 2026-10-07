@@ -97,7 +97,7 @@ roots = []  # extra workspace folders to index for file tags
 
 [audio]
 device = ""  # input device name; "" = system default (pick one in Settings > Config)
-preroll_ms = 400  # keep the mic open and include this much audio from before the key went down (0 = open the mic on key-down)
+preroll_ms = 0  # 0 = mic opened once and started on key-down (no "in use" indicator between dictations); > 0 = keep it running and include this much audio from before the key
 keep_recordings = 0  # save the last N recordings (+ raw transcript) to ~/.murmur/recordings for model comparisons; 0 = off
 
 [output]
@@ -142,7 +142,7 @@ def no_copy(cfg):
 
 
 def preroll_s(cfg):
-    return max(0, int(cfg.get("audio", {}).get("preroll_ms", 400))) / 1000
+    return max(0, int(cfg.get("audio", {}).get("preroll_ms", 0))) / 1000
 
 
 def tail_s(cfg):
