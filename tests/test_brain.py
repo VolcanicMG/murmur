@@ -311,6 +311,15 @@ class T(unittest.TestCase):
         self.assertEqual(q("the thing was quote super quote cool"), 'the thing was "super" cool')  # bare second quote closes
         self.assertEqual(brain.spoken_forms("say quote forty two end quote now"), 'say "forty two" now')  # runs inside spoken_forms
 
+    def test_restore_breaks(self):
+        rb = brain.restore_breaks
+        self.assertEqual(rb("plums,\nand a bag of oranges.", "Groceries: pineapples, pears, peaches, plums, and a bag of oranges."),
+                         "Groceries: pineapples, pears, peaches, plums,\nand a bag of oranges.")
+        self.assertEqual(rb("First point done.\n\nSecond point.", "First point done. Second point."), "First point done.\n\nSecond point.")
+        kept = "First point done.\n\nSecond point."
+        self.assertEqual(rb("First point done.\n\nSecond point.", kept), kept)  # already there
+        self.assertEqual(rb("a b\nc", "totally different"), "totally different")  # no anchor: untouched
+
     def test_spoken_breaks(self):  # E2
         a = brain.apply_scratch
         self.assertEqual(a("first point done new paragraph second point done"), "first point done\n\nsecond point done")

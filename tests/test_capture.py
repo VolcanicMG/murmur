@@ -275,10 +275,11 @@ class Conditioning(unittest.TestCase):
         x = np.concatenate([quiet[:16000 * 2], self.tone(0.5, 0.02), quiet[:16000 * 3], self.tone(0.5, 0.02), quiet[:16000 * 2]])
         y = A.condition(x)
         # 2 s head + 3 s pause + 2 s tail shrink to 0.25 pad + ~0.25 + 1.0 pause + ~0.25 + 0.25 pad around 1 s of speech
-        self.assertLess(len(y) / 16000, 3.6); self.assertGreater(len(y) / 16000, 2.2)
+        self.assertLess(len(y) / 16000, 4.1); self.assertGreater(len(y) / 16000, 2.2)
         self.assertTrue(np.all(y[: int(0.25 * 16000)] == 0))  # lead-in pad
-        self.assertGreater(np.abs(y).max(), 0.1)  # the -34 dBFS tone was boosted toward -20 dBFS
-        self.assertLessEqual(np.abs(y).max(), 1.0)  # soft limiter
+        self.assertGreater(np.abs(y).max(), 0.05)  # the -34 dBFS tone counts as a quiet mic: boosted
+        self.assertLessEqual(np.abs(y).max(), 0.95)  # peak cap
+        self.assertFalse(A.has_speech(quiet)); self.assertTrue(A.has_speech(x))  # what the decode path actually uses
         self.assertEqual(len(A.condition(quiet)), len(quiet))  # silence: untouched
         loud = self.tone(1.0, 0.5)
         self.assertAlmostEqual(float(np.abs(A.condition(loud)).max()), 0.5, places=2)  # never lowered

@@ -18,11 +18,14 @@ def wait_cap(cfg, chunks):
 
 
 def transcribe(buf):
-    """Condition the take (trim/pauses/level/pad, see audio.py) and decode; an empty decode is retried on the untouched audio."""
+    """Decode the take as recorded. A segment with no speech in it is never decoded: Parakeet answers silence with "Yeah."/
+    "Okay." (the long-dictation split leaves exactly such a segment after the last word). The audio is NOT conditioned:
+    measured on Ethan's takes, every trim/pad/gain variant made Parakeet v2 worse (spelled-out numbers, dropped words); see
+    audio.py and evals/stt_compare.py."""
     if not buf:
         return ""
     x = np.concatenate(buf)[:, 0]
-    return stt.recognize(audio.condition(x)) or stt.recognize(x)
+    return stt.recognize(x) if audio.has_speech(x) else ""
 
 
 class Session:

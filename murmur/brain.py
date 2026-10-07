@@ -3,7 +3,7 @@ import difflib, logging, re
 from collections import Counter
 from . import llm, phonetic, store
 from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, find_cue, has_scratch,  # noqa: F401  (re-exports)
-                      restore_prose_identifiers, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
+                      restore_breaks, restore_prose_identifiers, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
 from .learn import (clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
                     redictation_terms)
 
@@ -206,7 +206,7 @@ def clean_checked(raw, ctx, retry=True, shortcut=True):
     attempts = [ctx] + ([{k: v for k, v in ctx.items() if k not in ("before", "after", "selected")}]
                         if retry and any(ctx.get(k) for k in ("before", "after", "selected")) else [])
     for n, c in enumerate(attempts, 1):
-        out = restore_prose_identifiers(raw, _chat(ctx["cfg"], build_system_prompt(c), user), ctx)
+        out = restore_breaks(raw, restore_prose_identifiers(raw, _chat(ctx["cfg"], build_system_prompt(c), user), ctx))
         stripped = SNIPPET_TOKEN.sub("", out)
         if plausible(raw, stripped) or (stripped != out and not stripped.strip()):  # only snippet tokens is fine
             return apply_snippets(out, snippets), True

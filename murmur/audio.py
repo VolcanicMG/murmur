@@ -1,14 +1,21 @@
-"""Condition a recording before Parakeet sees it: what the NeMo/Parakeet community found moves accuracy on dictation audio.
-  1. trim: cut leading/trailing silence down to PAD_S (long tails can empty a short utterance; NeMo-Speech #15757)
-  2. pauses: shorten any silence longer than MAX_PAUSE_S to MAX_PAUSE_S (speech after a long pause gets scored as silence)
-  3. level: boost-only loudness normalisation of the speech frames toward TARGET_DBFS, capped at MAX_GAIN_DB, soft limiter
-  4. pad: PAD_S of silence at both ends (a lead-in helps the first word; the caller retries unpadded if the decode is empty)
-Silence is judged per 20 ms frame against the recording's own noise floor (quietest 10 % + 12 dB), so it adapts to the mic.
-Pure numpy, no I/O; unit-tested."""
+"""Speech detection for the decode path, plus an audio-conditioning experiment the app deliberately does NOT use.
+
+What the app uses: speech_mask()/has_speech() — per-20 ms-frame energy against the recording's own noise floor (quietest 10 %
++ 12 dB). session.transcribe skips any segment without speech: Parakeet answers silence with "Yeah."/"Okay.", and the
+long-dictation split hands it exactly such a segment after the last word (every silent tail of Ethan's takes decoded alone
+gave 'Okay.').
+
+condition(): the community recipe (trim silence, cap pauses > MAX_PAUSE_S, boost a quiet mic toward TARGET_DBFS, pad both
+ends; NeMo-Speech #15757, hyprwhspr #268, Plainsong #173). Measured on 17 of Ethan's takes with evals/stt_compare (raw vs
+conditioned, Parakeet v2 int8): every variant, including trim+pad alone, made the output WORSE — "2:30" became "two
+thirty", "example.com" became "example dot com", "actually" was dropped, "launch" became "lunch". Parakeet's built-in
+number/URL formatting leans on the untouched context, so the live path decodes the raw take. Kept for stt_compare so a
+different mic or model can re-run the comparison. Pure numpy, no I/O; unit-tested."""
 import numpy as np
 
 RATE, FRAME_S = 16000, 0.02
-PAD_S, MAX_PAUSE_S, TARGET_DBFS, MAX_GAIN_DB, FLOOR_DB = 0.25, 1.0, -20.0, 20.0, 12.0
+PAD_S, TAIL_S, MAX_PAUSE_S = 0.25, 0.3, 1.5
+TARGET_DBFS, QUIET_DBFS, MAX_GAIN_DB, FLOOR_DB = -22.0, -32.0, 14.0, 12.0
 
 
 def _frames(x):
@@ -28,6 +35,11 @@ def speech_mask(x):
     return rms > thr
 
 
+def has_speech(x):
+    """True when at least two frames (40 ms) rise above the floor: decode this; otherwise don't (the model would invent)."""
+    return int(speech_mask(np.asarray(x, np.float32)).sum()) >= 2
+
+
 def condition(x):
     """float32 mono 16 kHz -> conditioned copy (see module doc). Audio with no detectable speech comes back unchanged."""
     x = np.asarray(x, np.float32)
@@ -36,8 +48,7 @@ def condition(x):
         return x
     fr, n = _frames(x)
     idx = np.flatnonzero(mask)
-    pad_f = int(PAD_S / FRAME_S)
-    lo, hi = max(0, idx[0] - pad_f), min(len(fr), idx[-1] + 1 + pad_f)
+    lo, hi = max(0, idx[0] - int(PAD_S / FRAME_S)), min(len(fr), idx[-1] + 1 + int(TAIL_S / FRAME_S))
     fr, mask = fr[lo:hi], mask[lo:hi]
     # shorten long pauses
     keep, run = np.ones(len(fr), bool), 0
@@ -48,12 +59,11 @@ def condition(x):
             keep[i] = False
     fr, mask = fr[keep], mask[keep]
     y = fr.reshape(-1)
-    # boost-only level toward TARGET_DBFS over speech frames, soft limiter
+    # a quiet mic only: linear gain, never past the peak cap
     speech = fr[mask].reshape(-1)
     rms = float(np.sqrt((speech * speech).mean())) if len(speech) else 0.0
-    if rms > 0:
-        gain = min(10 ** (TARGET_DBFS / 20) / rms, 10 ** (MAX_GAIN_DB / 20))
-        if gain > 1.0:
-            y = np.tanh(y * gain * 0.9) / 0.9  # ~linear below 0.5, never clips
+    if 0 < rms < 10 ** (QUIET_DBFS / 20):
+        gain = min(10 ** (TARGET_DBFS / 20) / rms, 10 ** (MAX_GAIN_DB / 20), 0.95 / max(float(np.abs(y).max()), 1e-6))
+        y = y * gain
     pad = np.zeros(int(PAD_S * RATE), np.float32)
     return np.concatenate([pad, y.astype(np.float32), pad])

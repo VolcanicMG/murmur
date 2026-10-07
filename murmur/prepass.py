@@ -255,6 +255,24 @@ def spoken_breaks(text):
     return _BREAK.sub(sub, text)
 
 
+def restore_breaks(prepared, final):
+    """spoken_breaks turned "new line"/"new paragraph" into line breaks before the LLM, which sometimes reflows them away
+    ("plums,\nand a bag" -> "plums, and a bag"). For every break the output lost, find the two words before it and put the
+    break back after them (and any punctuation that follows). Breaks already present are left alone."""
+    if prepared.count("\n") <= final.count("\n"):
+        return final
+    out = final
+    for m in re.finditer(r"(\n\n?)", prepared):
+        words = re.findall(r"[A-Za-z0-9']+", prepared[:m.start()])[-2:]
+        if not words:
+            continue
+        anchor = re.compile(r"\b" + r"\W+".join(map(re.escape, words)) + r"\b[,.;:!?]*", re.I)
+        hit = anchor.search(out)
+        if hit and not out[hit.end():].startswith("\n"):
+            out = out[:hit.end()].rstrip(" ") + m.group(1) + out[hit.end():].lstrip(" ")
+    return out
+
+
 _TLD = r"(?:com|org|net|edu|gov|io|co|dev|app|ai|me|us|uk|de|fr)"
 _LABEL = r"[a-z0-9][a-z0-9_-]*"
 _EMAIL = re.compile(rf"(?i)\b({_LABEL}(?:\s+dot\s+{_LABEL})*)\s+at\s+({_LABEL}(?:\s+dot\s+{_LABEL})*\s+dot\s+{_TLD}\b)")
