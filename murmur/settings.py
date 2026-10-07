@@ -220,15 +220,15 @@ def _armed_pill(parent, ui, label, confirm, action):
     def click():
         if st["armed"]:
             p.after_cancel(st["armed"]); st["armed"] = None
-            p.text = label; p.draw()
+            p.relabel(label)
             action()
             return
-        p.text = confirm; p.draw()
+        p.relabel(confirm)
         st["armed"] = p.after(4000, disarm)
 
     def disarm():
         st["armed"] = None
-        p.text = label; p.draw()
+        p.relabel(label)
     p = pill(parent, ui, label, click, "danger")
     return p
 

@@ -76,17 +76,17 @@ def start_llm(cfg):
 
 def boot(cfg, progress=lambda frac, text: None):
     """Load the speech model (bundled with the build) and make sure the LLM is up. progress(frac 0..1, step text) drives the
-    loading card; the fractions are the steps' typical share of a ~2 s start (the caller posts the final 100 %)."""
-    progress(0.05, "Loading speech model\u2026")
+    loading card; each fraction is where that step's share of the bar ends (the card paces the bar there itself)."""
+    progress(0.7, "Loading speech model\u2026")
     log.info("loading speech model from %s", stt.model_dir() if stt.model_dir().is_dir() else "the Hugging Face cache")
     stt.load_model(cfg)
-    progress(0.7, "Preparing window access\u2026")
+    progress(0.85, "Preparing window access\u2026")
     try:
         import comtypes.client
         comtypes.client.GetModule("oleacc.dll")  # warm the MSAA typelib so the first dictation doesn't pay for it
     except Exception as e:
         log.info("oleacc warm-up failed: %s", e)
-    progress(0.85, "Starting cleanup model\u2026")
+    progress(1.0, "Starting cleanup model\u2026")
     start_llm(cfg)
 
 

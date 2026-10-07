@@ -44,9 +44,15 @@ class Pill(_Round):
 
     def __init__(self, parent, ui, text, command):
         super().__init__(parent, ui, 32, cursor="hand2")
-        self.text, self.command = text, command  # 14 px horizontal padding, 32 px tall for every kind
-        self.config(width=ui.fonts["pill"].measure(text) + ui.k(28))
+        self.command = command
+        self.relabel(text)
         self.bind("<Enter>", lambda e: self._hover(True)); self.bind("<Leave>", lambda e: self._hover(False))
+
+    def relabel(self, text):
+        """Change the label and refit the width (14 px horizontal padding, 32 px tall for every kind)."""
+        self.text = text
+        self.config(width=self.ui.fonts["pill"].measure(text) + self.ui.k(28))
+        self.draw()
         self.bind("<ButtonRelease-1>", lambda e: self.command() if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height() else None)
 
     def _hover(self, on):

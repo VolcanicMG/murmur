@@ -24,7 +24,8 @@ STATES = {
     "done": ("Done", SUCCESS, TEXT, "flat", False, False, 1600, "", False),
     "error": ("No microphone", ERROR, ERR_TEXT, "grey", False, True, 8000,
               "No microphone detected. Plug one in or pick another input in Settings.", False),
-    "loading": ("Starting", ACCENT, TEXT, "progress", False, False, None, "Loading speech model\u2026", False),
+    "loading": ("Starting", SECONDARY, TEXT, "progress", False, False, None, "Loading speech model\u2026", False),  # grey: not listening
+    "ready": ("Ready", SUCCESS, TEXT, "progress", False, False, None, "", False),  # full bar in green for the start-up hold
     "offline": ("Model offline", ERROR, TEXT, "grey", False, False, 2400,
                 "Pasted the raw transcript; cleanup unavailable.", False),
     "paste_failed": ("Couldn't paste", ERROR, TEXT, "grey", False, False, 2800,
@@ -35,6 +36,10 @@ STATES = {
     "failed": ("Startup failed", ERROR, ERR_TEXT, "grey", False, False, 9000,
                "The speech model failed to load. See murmur.log.", False),
 }
+
+
+STARTUP = ("loading", "ready")  # card states owned by the boot sequence
+PROG_RATE, READY_HOLD_MS = 1 / 4.0, 3000  # the loading bar fills at a fixed pace (full in 4 s, never jumps), then "Ready" holds 3 s
 
 
 def envelope(i, n=64):
@@ -135,7 +140,7 @@ class Card:
         self.tail_up, self.card_x, self.kind = False, 0, "caret"
         self.st, self.text, self.interim, self.field, self.dest, self.label_o = "listening", "", "", None, "", None
         self.lvl, self._t_last, self._anim = 0.0, time.monotonic(), None  # smoothed level; ("in"|"out", t0)
-        self.prog, self.prog_cap = 0.0, 0.0  # loading progress; creeps toward the cap while a step runs
+        self.prog, self.prog_cap = 0.0, 0.0  # loading progress: moves at PROG_RATE toward the cap (the running step's end share)
         self._col_from, self._col_t0, self._dismiss_id, self._geom, self.level_fn = ACCENT, 0.0, None, "", None
         self.root = r = tk.Tk()
         r.title("murmur card"); r.overrideredirect(True)
@@ -232,17 +237,16 @@ class Card:
         self._appear()
 
     def progress(self, frac, text):
-        """Loading card step: bars fill to `frac` (then creep toward the next step's share), `text` names the step."""
+        """Loading card step: `frac` is where this step ends (the bar paces itself there), `text` names the step. The switch
+        to "ready" happens in _frame when the bar arrives at 100 %, so the end is never a jump."""
         self.prog_cap, self.text = frac, text
-        if frac >= 1.0:
-            self.prog = 1.0
-        if self.st != "loading":
+        if self.st not in STARTUP:
             self.flash("loading", text)
 
     def release(self):
         """The session is over: keep the card if its state dismisses itself, otherwise hide."""
         self.recording = False
-        if self._dismiss_id is None and self.st != "loading":
+        if self._dismiss_id is None and self.st not in STARTUP:
             self.hide()
 
     def hide(self):
@@ -356,7 +360,10 @@ class Card:
         raw = self.level_fn(now) if self.level_fn else self.level
         kind = STATES[self.st][3]
         if kind == "progress":
-            self.prog = min(self.prog_cap, self.prog + dt * 0.12)  # a long step still looks alive
+            self.prog = min(self.prog_cap, self.prog + dt * PROG_RATE)
+            if self.st == "loading" and self.prog >= 1.0:  # reached the end for real: green Ready, then hide unless a session took over
+                self._set_state("ready", fade=False)
+                self.root.after(READY_HOLD_MS, lambda: self.st in STARTUP and self.hide())
         tgt = norm_level(raw) if kind == "live" else self.prog if kind == "progress" else 0.0
         if self.st == "listening":
             tgt = max(tgt, 0.1 + 0.05 * abs(math.sin(now * 5.5)))  # idle wobble until speech arrives
@@ -550,7 +557,7 @@ def demo(state=None):
         text, interim = sample.get(name, ("", ""))
         c.state(name, text); c.transcript(text, interim)
         c._cancel_dismiss()  # demo holds each state
-        c.prog, c.prog_cap = 0.0, 1.0  # loading: the bar creeps to full
+        c.prog, c.prog_cap = (1.0, 1.0) if name == "ready" else (0.0, 0.999)  # loading: the bar paces up (stops short of flipping to ready); ready: full
 
     def bench():  # composition + UpdateLayeredWindow time over the first 200 frames, written next to the screenshots
         if len(c._ms) < 200:

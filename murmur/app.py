@@ -8,7 +8,6 @@ from . import tray
 from .tray import TOOLTIPS, tray_image
 
 log = logging.getLogger("murmur")
-READY_HOLD_MS = 3000  # the loading card stays at 100 % this long so the start is seen, not a flash
 S = {"mode": None, "held": False, "paused": False, "sid": 0, "last_paste": (0.0, "", ""), "capturing": False, "ready": False, "session": None, "g": ("idle", 0.0), "dropped": False, "last_fg": "", "keys": {}, "pending_rebind": False}  # shared hotkey/session state
 _bound = {"ov": None, "mark": None, "removers": []}  # hotkey registration bookkeeping (see rebind_hotkeys)
 _NOT_FG = {"", "python.exe", "pythonw.exe", "murmur.exe", "explorer.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe"}
@@ -409,8 +408,7 @@ def tray_app(cfg, learn, boot, first_run=False):
             return
         _purge_loop(cfg)
         S["ready"] = True
-        ov.post(lambda: ov.progress(1.0, f"Ready. Hold {keys['dictate']} to dictate."))
-        ov.post(lambda: ov.root.after(READY_HOLD_MS, lambda: ov.st == "loading" and ov.hide()))  # a session that started meanwhile owns the card
+        ov.post(lambda: ov.progress(1.0, f"Hold {keys['dictate']} to dictate."))  # the card finishes the bar, shows Ready and hides itself
         log.info("ready: hold %s to dictate, %s for commands, %s adds the selected word", keys["dictate"], keys["command"], learn_key)
         if cfg.get("ui", {}).get("startup_toast", True):
             try:
