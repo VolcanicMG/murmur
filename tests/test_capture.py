@@ -283,3 +283,69 @@ class Conditioning(unittest.TestCase):
         self.assertEqual(len(A.condition(quiet)), len(quiet))  # silence: untouched
         loud = self.tone(1.0, 0.5)
         self.assertAlmostEqual(float(np.abs(A.condition(loud)).max()), 0.5, places=2)  # never lowered
+
+
+class SileroMode(unittest.TestCase):
+    CFG = {"silence_ms": 2000, "no_speech_ms": 6000}
+
+    def run_probs(self, probs, dt=0.032):
+        s, out = capture.vad_new(), []
+        for p in probs:
+            s, d = capture.vad_step(s, 0.0, dt, self.CFG, p)  # rms 0: only the probability decides
+            out.append(d)
+        return s, out
+
+    def test_speech_from_the_first_block_is_heard(self):  # the energy floor window would have swallowed this
+        s, out = self.run_probs([0.9] * 60)  # ~1.9 s of speech straight away
+        self.assertTrue(s["speech"]); self.assertGreater(s["speech_s"], 1.5); self.assertTrue(all(d is None for d in out))
+
+    def test_hysteresis_and_finish(self):
+        s, _ = self.run_probs([0.9] * 20 + [0.4] * 10)  # 0.4 right after speech still counts (>= KEEP_P)
+        self.assertEqual(s["quiet_ms"], 0.0)
+        s, out = self.run_probs([0.9] * 20 + [0.1] * 70)  # 2.24 s of non-speech after speech
+        first = next(i for i, d in enumerate(out) if d)  # the session acts on the first decision
+        self.assertEqual(out[first], "finish"); self.assertAlmostEqual((first - 19) * 0.032, 2.0, delta=0.05)
+
+    def test_cancel_without_speech(self):
+        _, out = self.run_probs([0.2] * 200)
+        self.assertIn("cancel", out)
+
+
+class SileroStream(unittest.TestCase):
+    def setUp(self):
+        self.np = _numpy_or_skip(self)
+        from murmur import vad
+        self.vad = vad
+
+    def test_hops_context_and_max(self):
+        np, V = self.np, self.vad
+        calls = []
+
+        class Sess:
+            def run(self, names, feeds):
+                calls.append(feeds["input"].shape)
+                return np.array([[0.2 + 0.1 * len(calls)]], np.float32), feeds["state"] + 1
+
+        s = V.Silero(Sess())
+        self.assertEqual(s.feed(np.zeros(300, np.float32)), 0.0)  # no full hop yet
+        self.assertAlmostEqual(s.feed(np.zeros(300, np.float32)), 0.3, places=5)  # one hop
+        self.assertEqual(calls, [(1, V.CTX + V.HOP)])  # 64 samples of context + 512
+        self.assertAlmostEqual(s.feed(np.zeros(1100, np.float32)), 0.5, places=5)  # two hops: the max
+        self.assertEqual(float(s.state[0, 0, 0]), 3.0)  # state carried across hops
+        s.reset(); self.assertEqual(s.prob, 0.0); self.assertEqual(float(s.state.sum()), 0.0)
+
+    def test_safe_disables_on_error(self):
+        np = self.np
+
+        class Boom:
+            def run(self, names, feeds):
+                raise RuntimeError("onnx")
+
+        s = self.vad.Silero(Boom())
+        self.assertIsNone(s.safe(np.zeros(600, np.float32)))  # the error is swallowed in the callback
+        self.assertTrue(s.dead); self.assertIsNone(s.safe(np.zeros(600, np.float32)))
+        s.reset(); self.assertFalse(s.dead)  # the next session tries again
+
+    def test_missing_model_falls_back(self):
+        import tempfile
+        self.assertIsNone(self.vad.load(tempfile.mkdtemp()))

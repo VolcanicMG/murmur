@@ -36,6 +36,9 @@ class Session:
         self.mode, self.cfg, self.ov = mode, cfg, ov
         self.held, self.stop, self.current, self.done, self.mark = hooks.held, hooks.stop, hooks.current, hooks.done, hooks.mark
         self.retry, self.mic = hooks.retry, getattr(hooks, "mic", None)  # mic: the always-open monitor (pre-roll), or None
+        self.vad_model = getattr(hooks, "vad", None)  # streaming Silero (vad.py), one shared instance, reset per session
+        if self.vad_model:
+            self.vad_model.reset()
         self.live = getattr(hooks, "live", lambda: False)  # is any session running (deferred background work waits)
         self.pasted, self.last_paste = hooks.pasted, hooks.last_paste  # (time, app, text) of the last paste lives in app state across sessions
         self.stream, self.buf = None, []
@@ -185,7 +188,8 @@ class Session:
         if self.full is not None:
             self.full.append(d.copy())
         self.buf.append(d.copy())
-        self.vad, decision = capture.vad_step(self.vad, rms, len(d) / 16000, self.cfg.get("dictation", {}))
+        prob = self.vad_model.safe(d[:, 0]) if self.vad_model else None  # Silero when bundled, else the energy test
+        self.vad, decision = capture.vad_step(self.vad, rms, len(d) / 16000, self.cfg.get("dictation", {}), prob)
         if decision and self.latched and not self.vad_decision:  # silence auto-stop is for hands-free sessions only
             self.vad_decision = decision
             self.stop()

@@ -311,6 +311,17 @@ class T(unittest.TestCase):
         self.assertEqual(q("the thing was quote super quote cool"), 'the thing was "super" cool')  # bare second quote closes
         self.assertEqual(brain.spoken_forms("say quote forty two end quote now"), 'say "forty two" now')  # runs inside spoken_forms
 
+    def test_restore_quotes(self):  # Ethan 10-06: the LLM stripped the marks spoken_quotes put in
+        rq, p = brain.restore_quotes, brain.apply_scratch
+        self.assertEqual(rq(p("Quote, super, quote, cool."), "super cool."), '"super" cool.')
+        self.assertEqual(rq(p("Quote, super, end quote, cool."), "super, cool."), '"super", cool.')
+        self.assertEqual(rq(p("She asked, quote, Are we shipping Thursday? End quote. And nobody answered."),
+                            "She asked, Are we shipping Thursday? And nobody answered."),
+                         'She asked, "Are we shipping Thursday?" And nobody answered.')
+        self.assertEqual(rq('"hello" there', '"hello" there'), '"hello" there')  # already quoted: untouched
+        self.assertEqual(rq('"hello" there', "hi there"), "hi there")  # the model rephrased it: never invent
+        self.assertEqual(p("she asked quote are we done? end quote. ok"), 'she asked "are we done?" ok')  # no '?".'
+
     def test_restore_breaks(self):
         rb = brain.restore_breaks
         self.assertEqual(rb("plums,\nand a bag of oranges.", "Groceries: pineapples, pears, peaches, plums, and a bag of oranges."),

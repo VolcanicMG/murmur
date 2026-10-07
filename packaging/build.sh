@@ -9,6 +9,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIN_PY="${WIN_PY:-/mnt/c/Users/ethan/.murmur/venv/Scripts/python.exe}"
 BUILD_DIR="${BUILD_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build}"
 INSTALL_DIR="${INSTALL_DIR:-/mnt/c/Users/ethan/AppData/Local/Programs/murmur}"  # outside OneDrive: it caches stale icons and would sync the folder per build
+VAD_DIR="${VAD_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build-model/silero}"  # Silero VAD (2 MB), same cache
 MODEL_DIR="${MODEL_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build-model/parakeet-v2}"  # speech model (stt.DEFAULT_MODEL), fetched once and kept across builds; the folder name must change with the model
 
 # Safety: the clean-replace below deletes everything inside these folders, so only ever do it to folders that look like ours.
@@ -35,8 +36,9 @@ find "$BUILD_DIR/murmur" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>
 
 echo "[2/4] Speech model -> $MODEL_DIR (download only if missing), then PyInstaller (Windows Python) ..."
 [[ -f "$MODEL_DIR/config.json" ]] || ( cd "$BUILD_DIR" && "$WIN_PY" -m murmur fetch-model "$(wslpath -w "$MODEL_DIR")" )
+[[ -f "$VAD_DIR/silero_vad.onnx" ]] || ( cd "$BUILD_DIR" && "$WIN_PY" -m murmur fetch-vad "$(wslpath -w "$VAD_DIR")" )
 start=$(date +%s)
-( cd "$BUILD_DIR" && MURMUR_MODEL_DIR="$MODEL_DIR" WSLENV="${WSLENV:+$WSLENV:}MURMUR_MODEL_DIR/p" "$WIN_PY" -m PyInstaller --noconfirm --clean --distpath dist --workpath build murmur.spec )  # WSLENV /p hands the path to Windows
+( cd "$BUILD_DIR" && MURMUR_MODEL_DIR="$MODEL_DIR" MURMUR_VAD_DIR="$VAD_DIR" WSLENV="${WSLENV:+$WSLENV:}MURMUR_MODEL_DIR/p:MURMUR_VAD_DIR/p" "$WIN_PY" -m PyInstaller --noconfirm --clean --distpath dist --workpath build murmur.spec )  # WSLENV /p hands the path to Windows
 echo "build time: $(( $(date +%s) - start ))s"
 
 OUT="$BUILD_DIR/dist/murmur"

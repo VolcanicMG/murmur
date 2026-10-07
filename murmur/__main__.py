@@ -144,8 +144,8 @@ def main():
         from . import win
         win.dpi_aware()  # before any window exists
     ap = argparse.ArgumentParser(prog="murmur", description="Local voice dictation")
-    ap.add_argument("cmd", nargs="?", choices=["learn", "fetch-model"], help="learn: rebuild style.md from history; fetch-model: download the speech model into the build folder")
-    ap.add_argument("dest", nargs="?", help="with fetch-model: target folder (default packaging/models/parakeet)")
+    ap.add_argument("cmd", nargs="?", choices=["learn", "fetch-model", "fetch-vad"], help="learn: rebuild style.md from history; fetch-model / fetch-vad: download the speech model / Silero VAD into the build folder")
+    ap.add_argument("dest", nargs="?", help="with fetch-model / fetch-vad: target folder (default packaging/models/parakeet or /silero)")
     ap.add_argument("--settings", nargs="?", const="History", metavar="TAB", help="open the settings window only (optionally on TAB)")
     ap.add_argument("--demo-card", nargs="?", const="", metavar="STATE", help="show the caption card with fake data (cycles states, or freezes STATE)")
     ap.add_argument("--demo-tray", metavar="STATE", help="save the tray icon for STATE to ~/.murmur/shots/")
@@ -161,6 +161,9 @@ def main():
         print(__version__); return
     if a.cmd == "fetch-model":  # build step: no ~/.murmur needed
         print(stt.fetch(a.dest)); return
+    if a.cmd == "fetch-vad":
+        from . import vad
+        print(vad.fetch(a.dest)); return
     first_run = store.ensure()  # True when config.toml did not exist: the tray app opens the setup window once
     if a.exclude or a.shell_menu:
         return shell_verb(a)

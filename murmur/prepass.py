@@ -309,7 +309,26 @@ def spoken_quotes(text):
     """'quote starting end quote' -> '"starting"'; the closer may be end/close quote, unquote, or just 'quote' again
     ('the thing was quote super quote cool'). The quoted words keep their case; a comma/period the model put right before the
     closing cue is dropped, one after it is kept."""
-    return _QUOTE.sub(lambda m: '"' + m.group("q").strip() + '"' + (m.group(0)[-1] if m.group(0)[-1] in ".," else ""), text)
+    def sub(m):
+        q, tail = m.group("q").strip(), m.group(0)[-1] if m.group(0)[-1] in ".," else ""
+        return '"' + q + '"' + ("" if tail == "." and q[-1:] in ".?!" else tail)  # 'Thursday?".' -> 'Thursday?"'
+    return _QUOTE.sub(sub, text)
+
+
+def restore_quotes(prepared, final):
+    """spoken_quotes put quote marks in before the LLM, which often drops them ('"super" cool' -> 'super cool'). For every
+    quoted span of `prepared` whose words appear unquoted in `final`, wrap that occurrence again. Spans the output dropped or
+    rephrased are left alone (never invent text)."""
+    out = final
+    for m in re.finditer(r'"([^"\n]+)"', prepared):
+        words = re.findall(r"[A-Za-z0-9']+", m.group(1))
+        if not words:
+            continue
+        span = re.compile(r"(?<![\w\"\u201c])" + r"\W+".join(map(re.escape, words)) + r"[?!.]?(?![\w\"\u201d])", re.I)
+        hit = span.search(out)
+        if hit:
+            out = out[:hit.start()] + '"' + hit.group(0) + '"' + out[hit.end():]
+    return out
 
 
 def spoken_forms(text):

@@ -3,6 +3,7 @@ import statistics
 
 IGNORE_S, FLOOR_S, MIN_RMS, MAX_FLOOR = 0.25, 0.3, 0.008, 0.01  # skip the start-cue window, then sample the floor
 COMMIT_AUDIO_S, COMMIT_PAUSE_MS, MAX_OPEN_S = 8.0, 700, 30.0  # commit: >= 8 s then a >= 700 ms pause; or force at 30 s
+SPEECH_P, KEEP_P = 0.5, 0.35  # Silero: speech starts at p >= 0.5 and lasts while p >= 0.35 (its own hysteresis defaults)
 
 
 def gesture(state, event, t, tap_ms=300):
@@ -47,26 +48,36 @@ def hallucinated(raw, speech_s):
 
 
 def vad_new():
-    return {"t": 0.0, "floor": [], "speech": False, "quiet_ms": 0.0, "speech_s": 0.0, "pauses": 0}
+    return {"t": 0.0, "floor": [], "speech": False, "on": False, "quiet_ms": 0.0, "speech_s": 0.0, "pauses": 0}
 
 
-def vad_step(state, rms, dt, cfg):
+def vad_step(state, rms, dt, cfg, prob=None):
     """One audio block (rms, dt seconds). The first 250 ms are ignored (the start cue may leak into the mic); the floor is
     the median RMS of the next 300 ms, capped at 0.01 so speaking at once can't raise the bar; speech = rms > max(3 x floor,
     0.008). Returns (new state, decision): "finish" after cfg silence_ms (2000) of non-speech following speech, "cancel" if
     no speech by cfg no_speech_ms (6000), else None. state["quiet_ms"] is the current run of non-speech. For the speaking
     metrics it also totals state["speech_s"] (seconds of speech; the 250 ms ignore window never counts and the floor window
-    counts blocks above 0.008) and state["pauses"] (speech resuming after a >= 700 ms gap)."""
+    counts blocks above 0.008) and state["pauses"] (speech resuming after a >= 700 ms gap).
+    prob (a Silero speech probability for this block, see vad.py) replaces the energy test when given: no floor window, a
+    block is speech while p >= SPEECH_P, or p >= KEEP_P right after speech (state["on"])."""
     s = dict(state)
     s["t"] = state["t"] + dt
     if s["t"] <= IGNORE_S + 1e-9:
         return s, None
+    if prob is not None:
+        s["on"] = prob >= SPEECH_P or (state.get("on", False) and prob >= KEEP_P)
+        return _advance(state, s, s["on"], dt, cfg)
     if s["t"] <= IGNORE_S + FLOOR_S + 1e-9:
         s["floor"] = state["floor"] + [rms]
         s["speech_s"] = state["speech_s"] + (dt if rms > MIN_RMS else 0.0)
         return s, None
     floor = min(statistics.median(s["floor"]), MAX_FLOOR) if s["floor"] else 0.0
-    if rms > max(3 * floor, MIN_RMS):
+    return _advance(state, s, rms > max(3 * floor, MIN_RMS), dt, cfg)
+
+
+def _advance(state, s, speaking, dt, cfg):
+    """Shared tail of vad_step once a block is classified: speech/pause bookkeeping and the finish/cancel decision."""
+    if speaking:
         if state["speech"] and state["quiet_ms"] >= COMMIT_PAUSE_MS:
             s["pauses"] = state["pauses"] + 1
         s["speech"], s["quiet_ms"], s["speech_s"] = True, 0.0, state["speech_s"] + dt

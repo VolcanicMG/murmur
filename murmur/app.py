@@ -38,7 +38,7 @@ def _hooks(sid, mark, retry):
 
     def last_paste():
         return S["last_paste"]
-    return SimpleNamespace(held=held, stop=stop, current=current, done=done, mark=mark, pasted=pasted, last_paste=last_paste, retry=retry, live=lambda: bool(S["session"]), mic=S.get("mic"))
+    return SimpleNamespace(held=held, stop=stop, current=current, done=done, mark=mark, pasted=pasted, last_paste=last_paste, retry=retry, live=lambda: bool(S["session"]), mic=S.get("mic"), vad=S.get("vad"))
 
 
 def probe_mic(cfg, ov):
@@ -413,6 +413,8 @@ def tray_app(cfg, learn, boot, first_run=False):
         from . import mic
         S["mic"] = mic.Monitor(lambda: mic.device_index(cfg), store.preroll_s(cfg))  # warm by default; pre-roll when configured
         S["mic"].start()
+        from . import vad
+        S["vad"] = vad.load()  # Silero for hands-free endpointing; None -> energy VAD
         S["ready"] = True
         ov.post(lambda: ov.progress(1.0, f"Hold {keys['dictate']} to dictate."))  # the card finishes the bar, shows Ready and hides itself
         log.info("ready: hold %s to dictate, %s for commands, %s adds the selected word", keys["dictate"], keys["command"], learn_key)
