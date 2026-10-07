@@ -151,7 +151,9 @@ class Painter:
         img.alpha_composite(hl, (P + bw, P + bw))
 
     def _tail(self, img, chh, v):
-        """Tail with +bw rows overlapping the card's border so the join is seamless."""
+        """Tail with +bw rows overlapping the card's border so the join is seamless. tcx < 0 = no tail (the start-up card)."""
+        if v.tcx < 0:
+            return
         k, P, bw = self.k, self.pad, max(1, self.k(1))
         t = render.tail(k(14), (TAIL, 0.95), (WHITE, 0.10), v.up, bw)
         img.alpha_composite(t, (P + k(v.tcx) - t.width // 2, P - t.height + bw if v.up else P + chh - bw))

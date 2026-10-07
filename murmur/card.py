@@ -39,7 +39,7 @@ STATES = {
 
 
 STARTUP = ("loading", "ready")  # card states owned by the boot sequence
-PROG_RATE, READY_HOLD_MS = 1 / 4.0, 3000  # the loading bar fills at a fixed pace (full in 4 s, never jumps), then "Ready" holds 3 s
+PROG_RATE, READY_HOLD_MS = 1 / 4.0, 1000  # the loading bar fills at a fixed pace (full in 4 s, never jumps), then "Ready" holds 1 s
 
 
 def envelope(i, n=64):
@@ -406,7 +406,7 @@ class Card:
         lay = p.layout(self.st, self.text, self.interim)
         x, y, up = place((W * s, lay.ch * s), f, win.work_area((f[0], f[1])), kind=self.kind)
         self.tail_up, self.card_x = up, x
-        tcx = min(max(43 + (f[0] - x) / s, 24), W - 24)  # tail 43 px from the visible left edge unless the card was clamped
+        tcx = -1 if self.st in STARTUP else min(max(43 + (f[0] - x) / s, 24), W - 24)  # tail 43 px from the visible left edge unless clamped; none at start-up (nothing to point at)
         label = self.label_o or STATES[self.st][0]
         img = p.draw(lay, self._view(label, self._color(), self.dest, up, tcx, self.lvl, now))
         self._retry_box = p.retry_box
@@ -468,7 +468,8 @@ class Card:
         else:
             tri = [tcx - d, ch, tcx, ch + d, tcx + d, ch]
         self._rrect((0.5, oy + 0.5, W - 0.5, oy + ch - 0.5), 24, FILL, hair)
-        c.create_polygon(tri, fill=TAIL, outline=hair, width=1)
+        if self.st not in STARTUP:
+            c.create_polygon(tri, fill=TAIL, outline=hair, width=1)
         by = oy if up else ch
         c.create_line(tcx - d + 1, by + (0.5 if up else -0.5), tcx + d - 1, by + (0.5 if up else -0.5), fill=TAIL)
         # header: chip
