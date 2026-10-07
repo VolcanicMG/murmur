@@ -8,6 +8,7 @@ from . import tray
 from .tray import TOOLTIPS, tray_image
 
 log = logging.getLogger("murmur")
+READY_HOLD_MS = 3000  # the loading card stays at 100 % this long so the start is seen, not a flash
 S = {"mode": None, "held": False, "paused": False, "sid": 0, "last_paste": (0.0, "", ""), "capturing": False, "ready": False, "session": None, "g": ("idle", 0.0), "dropped": False, "last_fg": "", "keys": {}, "pending_rebind": False}  # shared hotkey/session state
 _bound = {"ov": None, "mark": None, "removers": []}  # hotkey registration bookkeeping (see rebind_hotkeys)
 _NOT_FG = {"", "python.exe", "pythonw.exe", "murmur.exe", "explorer.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe"}
@@ -91,17 +92,30 @@ def is_private(cfg=None):
     return store.is_private(_cfg(cfg))
 
 
-def exclude_current(cfg=None):
-    """Toggle the last foreground app in [apps] exclude and save the config. Returns True if it is now excluded, None if
-    there is no app to toggle. Reached from the card's right-click menu ("Don't use murmur in <last_foreground()>")."""
-    cfg, app = _cfg(cfg), last_foreground()
-    if not app:
-        return None
-    ex = store.apps_exclude(cfg)
-    ex = [a for a in ex if a != app] if app in ex else ex + [app]
-    cfg.setdefault("apps", {})["exclude"] = ex
-    _save(cfg)
-    return app in ex
+def _watch_config():
+    """Another murmur process (the Explorer verb `murmur --exclude <file>`) may edit [apps] exclude in config.toml: pick the
+    change up on the 3 s poll, apply it to the live cfg and tell the user on the card."""
+    cfg, p = _bound.get("cfg"), store.HOME / "config.toml"
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return
+    if mtime == _bound.get("cfg_mtime"):
+        return
+    _bound["cfg_mtime"] = mtime
+    if cfg is None or not _bound.get("ov"):
+        return
+    try:
+        new = store.apps_exclude(store.load_config())
+    except (OSError, ValueError):
+        return
+    old = store.apps_exclude(cfg)
+    if new == old:
+        return  # our own save (Settings) or an unrelated edit
+    cfg.setdefault("apps", {})["exclude"] = new
+    added, removed = sorted(set(new) - set(old)), sorted(set(old) - set(new))
+    text = (f"murmur is off in {', '.join(added)}." if added else "") + (f" murmur is back on in {', '.join(removed)}." if removed else "")
+    _bound["ov"].post(lambda: _bound["ov"].flash("done" if added else "undone", text.strip(), label="Excluded" if added else "Included"))
 
 
 def toggle_private(cfg=None):
@@ -338,6 +352,7 @@ def _track_foreground():
     """Cheap 3 s poll so last_foreground() is right even when no hotkey was pressed (a chained daemon Timer)."""
     try:
         _note_foreground()
+        _watch_config()
     except Exception:
         pass
     t = threading.Timer(3.0, _track_foreground); t.daemon = True; t.start()
@@ -351,7 +366,12 @@ def tray_app(cfg, learn, boot, first_run=False):
         _set_icon(icon, state, S["keys"]["dictate"])
     S["keys"], learn_key, removers = _register(cfg, ov, mark)
     _bound.update(ov=ov, mark=mark, removers=removers, learn_key=learn_key, cfg=cfg)
-    ov.exclude_hook = (last_foreground, exclude_current)  # right-click on the card: "Don't use murmur in <app>"
+    if os.name == "nt":
+        try:
+            from . import shellmenu
+            shellmenu.sync(cfg)  # keep the Explorer verb's command pointing at this exe (or remove it when turned off)
+        except Exception:
+            log.exception("shell menu sync failed")
     _track_foreground()
     keys = S["keys"]
 
@@ -389,7 +409,8 @@ def tray_app(cfg, learn, boot, first_run=False):
             return
         _purge_loop(cfg)
         S["ready"] = True
-        ov.post(ov.hide)
+        ov.post(lambda: ov.progress(1.0, f"Ready. Hold {keys['dictate']} to dictate."))
+        ov.post(lambda: ov.root.after(READY_HOLD_MS, lambda: ov.st == "loading" and ov.hide()))  # a session that started meanwhile owns the card
         log.info("ready: hold %s to dictate, %s for commands, %s adds the selected word", keys["dictate"], keys["command"], learn_key)
         if cfg.get("ui", {}).get("startup_toast", True):
             try:

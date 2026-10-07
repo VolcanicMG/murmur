@@ -55,4 +55,5 @@ powershell.exe -NoProfile -Command "
   \$s = (New-Object -ComObject WScript.Shell).CreateShortcut(\$lnk)
   \$s.TargetPath = \$exe; \$s.WorkingDirectory = Split-Path \$exe; \$s.IconLocation = \$exe + ',0'; \$s.Description = 'murmur'
   \$s.Save(); Write-Output \"shortcut: \$lnk\"" | tr -d '\r'
+"$INSTALL_DIR/murmur.exe" --shell-menu on && echo "Explorer menu: registered (HKCU)"  # so the right-click entry exists before the first launch
 echo "DONE. Size: $(du -sh "$INSTALL_DIR" | cut -f1)  ->  $INSTALL_DIR/murmur.exe"

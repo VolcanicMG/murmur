@@ -127,6 +127,8 @@ class ModelDir(unittest.TestCase):
             self.assertEqual(calls[-1], (stt.DEFAULT_MODEL, stt.model_dir() if stt.model_dir().is_dir() else None, "int8"))
             stt.load_model({"stt": {"model": "other", "quantization": "int8"}})
             self.assertIsNone(calls[-1][1])  # a non-default model never reads the bundled folder
+            stt.load_model({"stt": {"model": stt.DEFAULT_MODEL, "quantization": "int8", "path": "D:/models/mine"}})
+            self.assertEqual(calls[-1], (None, "D:/models/mine", "int8"))  # a custom folder: onnx-asr reads the type from its config.json
             self.assertEqual(stt.fetch("/tmp/x").name, "x"); self.assertEqual(str(calls[-1][1]), "/tmp/x")
         finally:
             sys.modules.pop("murmur.stt", None)

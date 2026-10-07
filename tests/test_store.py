@@ -103,6 +103,16 @@ class T(unittest.TestCase):
         self.assertEqual(store.apps_exclude(c), ["game.exe"])
         self.assertTrue(store.is_private(c))
 
+    def test_clear_history_and_strip_keys(self):
+        store.HOME = Path(tempfile.mkdtemp()); store.ensure()
+        store.append_history({"ts": "2026-10-06T10:00:00", "final": "a", "fillers": 2, "duration_s": 3.0})
+        store.append_history({"ts": "2026-10-06T10:01:00", "final": "b"})
+        self.assertEqual(store.strip_history_keys(("fillers", "duration_s")), 1)
+        rows = store.read_history()
+        self.assertEqual([r["final"] for r in rows], ["a", "b"]); self.assertNotIn("fillers", rows[0])
+        self.assertEqual(store.clear_history(), 2)
+        self.assertEqual(store.read_history(), [])
+
     def test_purge_history(self):  # A4
         now = datetime(2026, 10, 10, 12, 0, 0)
         rows = [{"ts": "2026-08-01T10:00:00", "final": "old"}, {"ts": "2026-10-09T10:00:00", "final": "new"}, {"final": "no ts"},

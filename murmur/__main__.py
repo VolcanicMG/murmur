@@ -76,7 +76,7 @@ def start_llm(cfg):
 
 def boot(cfg, progress=lambda frac, text: None):
     """Load the speech model (bundled with the build) and make sure the LLM is up. progress(frac 0..1, step text) drives the
-    loading card; the fractions are the steps' typical share of a ~2 s start."""
+    loading card; the fractions are the steps' typical share of a ~2 s start (the caller posts the final 100 %)."""
     progress(0.05, "Loading speech model\u2026")
     log.info("loading speech model from %s", stt.model_dir() if stt.model_dir().is_dir() else "the Hugging Face cache")
     stt.load_model(cfg)
@@ -88,7 +88,6 @@ def boot(cfg, progress=lambda frac, text: None):
         log.info("oleacc warm-up failed: %s", e)
     progress(0.85, "Starting cleanup model\u2026")
     start_llm(cfg)
-    progress(1.0, "Ready")
 
 
 def selftest(real=False):
@@ -113,6 +112,24 @@ def selftest(real=False):
     sys.stdout.flush(); os._exit(0)  # skip onnxruntime teardown
 
 
+def shell_verb(a):
+    """--exclude FILE / --shell-menu on|off: short-lived process started from Explorer or the build script."""
+    from . import shellmenu, win
+    if a.shell_menu:
+        cfg, want = store.load_config(), a.shell_menu == "on"
+        if shellmenu.enabled(cfg) != want:  # only rewrite config.toml (comments are lost) when the value changes
+            cfg.setdefault("apps", {})["shell_menu"] = want
+            store.save_config(cfg)
+        shellmenu.sync(cfg)
+        print(f"Explorer menu {'installed' if a.shell_menu == 'on' else 'removed'}"); return
+    name, on = shellmenu.exclude_file(a.exclude)
+    msg = f"murmur is off in {name}. Right-click it again (or Settings \u203a Config) to turn it back on." if on else f"murmur is back on in {name}."
+    print(msg)
+    if os.name == "nt" and not win.instance_running():  # otherwise the running tray app shows it on the card
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, msg, "murmur", 0x40)
+
+
 def learn(cfg):
     hist = store.read_history(150)
     if not hist:
@@ -134,6 +151,8 @@ def main():
     ap.add_argument("--demo-tray", metavar="STATE", help="save the tray icon for STATE to ~/.murmur/shots/")
     ap.add_argument("--version", action="store_true", help="print the version and exit")
     ap.add_argument("--setup", action="store_true", help="open the first-run setup window only")
+    ap.add_argument("--exclude", metavar="FILE", help="toggle FILE's program (an .exe or .lnk) in [apps] exclude and exit (the Explorer right-click verb)")
+    ap.add_argument("--shell-menu", choices=["on", "off"], help="add or remove the Explorer right-click verb and exit")
     ap.add_argument("--selftest", action="store_true", help="transcribe+clean test.wav, no hotkeys (fresh temp HOME)")
     ap.add_argument("--real", action="store_true", help="with --selftest: use ~/.murmur instead of a fresh temp HOME")
     a = ap.parse_args()
@@ -143,6 +162,8 @@ def main():
     if a.cmd == "fetch-model":  # build step: no ~/.murmur needed
         print(stt.fetch(a.dest)); return
     first_run = store.ensure()  # True when config.toml did not exist: the tray app opens the setup window once
+    if a.exclude or a.shell_menu:
+        return shell_verb(a)
     if a.selftest:
         return selftest(a.real)
     if a.demo_card is not None:

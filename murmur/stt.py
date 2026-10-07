@@ -16,10 +16,21 @@ def model_dir():
 
 
 def load_model(cfg):
+    """[stt] path set = a user's own onnx-asr model folder (config.json names the type; quantized files are tried first, then
+    plain). Otherwise the default model: the bundled folder when present, else the Hugging Face cache."""
     global _model
     stt = cfg["stt"]
-    bundled = model_dir() if (stt["model"], stt["quantization"]) == (DEFAULT_MODEL, DEFAULT_QUANT) and model_dir().is_dir() else None
-    _model = onnx_asr.load_model(stt["model"], bundled, quantization=stt["quantization"])
+    quant = stt.get("quantization") or None
+    if custom := stt.get("path", ""):
+        try:
+            _model = onnx_asr.load_model(None, custom, quantization=quant)
+        except Exception:
+            if quant is None:
+                raise
+            _model = onnx_asr.load_model(None, custom, quantization=None)
+        return
+    bundled = model_dir() if (stt.get("model", DEFAULT_MODEL), quant) == (DEFAULT_MODEL, DEFAULT_QUANT) and model_dir().is_dir() else None
+    _model = onnx_asr.load_model(stt.get("model", DEFAULT_MODEL), bundled, quantization=quant)
 
 
 def fetch(dest=None):

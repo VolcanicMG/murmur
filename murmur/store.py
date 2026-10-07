@@ -109,6 +109,7 @@ code = "Tone: code context. Preserve identifiers (camelCase, snake_case, kebab-c
 [stt]
 model = "nemo-parakeet-tdt-0.6b-v3"
 quantization = "int8"
+path = ""  # a folder with your own onnx-asr model (config.json + .onnx); empty = the bundled Parakeet
 
 [apps]
 "slack.exe" = "casual"
@@ -127,6 +128,7 @@ quantization = "int8"
 no_copy = ["windowsterminal.exe", "wt.exe", "conhost.exe", "openconsole.exe"]
 exclude = []  # process names where murmur ignores its hotkeys entirely
 pause_fullscreen = true  # ignore hotkeys while a Direct3D exclusive-fullscreen app (a game) is in front
+shell_menu = true  # Explorer right-click on an .exe/.lnk: "Don't use murmur in this app" (HKCU, no admin)
 """
 NO_COPY = ["windowsterminal.exe", "wt.exe", "conhost.exe", "openconsole.exe"]  # ctrl+c here would SIGINT the running program
 
@@ -444,6 +446,28 @@ def merged_config(cfg=None):
 def key_matches(event_name, key):
     """keyboard matches hooks by scan code (left ctrl fires 'right ctrl'); compare the sided event name."""
     return (event_name or "").lower() == key.lower()
+
+
+def clear_history():
+    """Delete every history row (atomic truncate under the history lock). Returns how many were removed."""
+    with _locked():
+        n = len(_read_history_unlocked())
+        tmp = HOME / "history.jsonl.tmp"
+        tmp.write_text("", encoding="utf-8")
+        os.replace(tmp, HOME / "history.jsonl")
+    return n
+
+
+def strip_history_keys(keys):
+    """Remove `keys` from every history row (the Speech page's reset: the dictations stay, the speaking metrics start over)."""
+    keys = set(keys)
+    with _locked():
+        rows = _read_history_unlocked()
+        n = sum(1 for r in rows if keys & r.keys())
+        tmp = HOME / "history.jsonl.tmp"
+        tmp.write_text("".join(json.dumps({k: v for k, v in r.items() if k not in keys}, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        os.replace(tmp, HOME / "history.jsonl")
+    return n
 
 
 def purge_history(days, now=None):

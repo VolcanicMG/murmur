@@ -213,6 +213,26 @@ def _page(content, ui, title, desc):
     return SimpleNamespace(frame=f, body=body, bar=bar)
 
 
+def _armed_pill(parent, ui, label, confirm, action):
+    """Danger pill that asks once: the first click relabels it to `confirm` for 4 s, the second runs action()."""
+    st = {"armed": None}
+
+    def click():
+        if st["armed"]:
+            p.after_cancel(st["armed"]); st["armed"] = None
+            p.text = label; p.draw()
+            action()
+            return
+        p.text = confirm; p.draw()
+        st["armed"] = p.after(4000, disarm)
+
+    def disarm():
+        st["armed"] = None
+        p.text = label; p.draw()
+    p = pill(parent, ui, label, click, "danger")
+    return p
+
+
 def _pills(page, ui, *specs):
     for label, cmd, kind in specs:
         pill(page.bar, ui, label, cmd, kind).pack(side="left", padx=(0, ui.k(8)))
@@ -294,6 +314,7 @@ def _history_page(content, ui, root, fix):
         if r := current():
             store.delete_row(r["ts"], r["final"]); load()
     _pills(pg, ui, ("Copy", copy, "primary"), ("Copy raw", copy_raw, "secondary"), ("Fix\u2026", fix_row, "secondary"), ("Delete row", delete, "danger"), ("Refresh", load, "secondary"))
+    _armed_pill(pg.bar, ui, "Delete all", "Click again to delete every row", lambda: (store.clear_history(), load())).pack(side="right")
     return pg, load
 
 
@@ -474,6 +495,11 @@ def _config_page(content, ui, status, after_save, standalone=False):
             store.save_config(cfg)
         except (ValueError, TypeError) as e:
             status.set(f"Not saved: {e}", "error"); return
+        try:
+            from . import shellmenu
+            shellmenu.sync(cfg)  # registry follows [apps] shell_menu
+        except Exception as e:
+            status.set(f"Saved, but the Explorer menu could not be updated: {e}", "error"); return
         after_save()
     raw.bind_buttons(load)
     _pills(pg, ui, ("Save", save_form, "primary"), ("Reload", load, "secondary"))
@@ -606,9 +632,45 @@ def _learning_card(B):
     _number_row(B, g, "learning.style_every", "Update style every (dictations)")
 
 
+BUNDLED_STT, CUSTOM_STT = "Parakeet TDT 0.6B v3 (bundled)", "Custom folder\u2026"
+
+
+class ModelPicker(tk.Frame):
+    """[stt] path as a dropdown: the bundled model, or a folder the user picks (tk's directory dialog). get() = "" or the folder."""
+
+    def __init__(self, parent, ui):
+        super().__init__(parent, bg=FIELD)
+        self.path, self.ui = "", ui
+        self.sel = Select(self, ui, [BUNDLED_STT, CUSTOM_STT]); self.sel.pack(side="left")
+        self.lab = _label(self, ui, "", "small", SECONDARY, FIELD); self.lab.pack(side="left", padx=(ui.k(10), 0))
+        self.sel.var.trace_add("write", lambda *_: self._changed())
+
+    def _changed(self):
+        if self.sel.get() == CUSTOM_STT and not self.path:
+            from tkinter import filedialog
+            d = filedialog.askdirectory(parent=self, title="Folder with an onnx-asr model (config.json + .onnx)")
+            if d and (Path(d) / "config.json").is_file():
+                self.path = d
+            else:
+                self.sel.set(BUNDLED_STT)  # cancelled or not a model folder
+                return
+        if self.sel.get() == BUNDLED_STT:
+            self.path = ""
+        self.lab.config(text=self.path)
+
+    def get(self):
+        return self.path
+
+    def set(self, value):
+        self.path = str(value or "")
+        self.sel.set(CUSTOM_STT if self.path else BUNDLED_STT)
+        self.lab.config(text=self.path)
+
+
 def _speech_card(B):
     g = _grid_card(B, "Speech model")
-    _text_row(B, g, "stt.model", "Model"); _row(B, g, "stt.quantization", "Quantization", Select(g, B.ui, ["int8", "none"]))
+    _row(B, g, "stt.path", "Model", ModelPicker(g, B.ui))
+    _row(B, g, "stt.quantization", "Quantization", Select(g, B.ui, ["int8", "none"]))
 
 
 def _cleanup_card(B):
@@ -668,6 +730,7 @@ def _apps_card(B):
     B.fields["exclude"] = ChipList(rows, B.ui); B.fields["exclude"].pack(fill="x")
     tg = tk.Frame(rows, bg=FIELD); tg.pack(fill="x", pady=(k(12), 0)); tg.columnconfigure(0, minsize=k(210)); tg.columnconfigure(1, weight=1)
     _toggle_row(B, tg, "apps.pause_fullscreen", "Pause in fullscreen games")
+    _toggle_row(B, tg, "apps.shell_menu", "Explorer right-click: \u201cDon't use murmur in this app\u201d")[0].config(wraplength=k(190), justify="left")
 
 
 def _advanced_card(B):

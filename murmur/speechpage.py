@@ -54,7 +54,7 @@ def page(content, ui, cfg, after_save):
     import tkinter as tk
     from . import render
     from .inputs import Select
-    from .settings import Panel, _label, _page, _scroll_frame
+    from .settings import Panel, _armed_pill, _label, _page, _scroll_frame
     from .theme import ACCENT, AMBER, FIELD, FILL, HAIR, NAME, SECONDARY, SUCCESS, TEXT, INPUT, blend, on_fill
     from .widgets import Toggle, _Round, put
     k = ui.k
@@ -233,4 +233,8 @@ def page(content, ui, cfg, after_save):
         apps = sorted({r.get("app") for r in st["rows"] if r.get("app")})
         app_sel.reset(["All apps"] + apps)
         render_all()
+    def reset():
+        from . import speech
+        store.strip_history_keys(speech.FIELDS); load()  # dictations stay; the metrics and their baseline start over
+    _armed_pill(pg.bar, ui, "Reset speech data", "Click again to drop every speaking metric", reset).pack(side="right")
     return pg, load

@@ -9,6 +9,18 @@ from .theme import FILL, TEXT
 _mutex = None  # kept for the process lifetime
 
 
+def instance_running():
+    """True if a murmur tray app holds the single-instance mutex (read-only probe; never creates it)."""
+    if os.name != "nt":
+        return False
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenMutexW.restype = wintypes.HANDLE
+    h = k32.OpenMutexW(0x00100000, False, "Local\\murmur-single-instance")  # SYNCHRONIZE
+    if h:
+        k32.CloseHandle(h)
+    return bool(h)
+
+
 def single_instance():
     """True if this is the only murmur tray app; else tells the user (native box) and returns False. Always True off Windows."""
     global _mutex

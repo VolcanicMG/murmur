@@ -122,10 +122,6 @@ class TrayHooks(unittest.TestCase):
         self.assertTrue(app.toggle_private())
         self.assertTrue(app.is_private())
         self.assertTrue(store.is_private(store.load_config()))  # persisted
-        self.assertIsNone(app.exclude_current())  # nothing seen yet
-        app.S["last_fg"] = "game.exe"
-        self.assertTrue(app.exclude_current())
-        self.assertEqual(store.apps_exclude(store.load_config()), ["game.exe"])
 
 
 class Exclusions(unittest.TestCase):
@@ -143,13 +139,22 @@ class Exclusions(unittest.TestCase):
                 self.app._note_foreground()
             self.assertEqual(self.app.last_foreground(), want)
 
-    def test_exclude_current_toggles_and_persists(self):  # A3
-        self.assertIsNone(self.app.exclude_current(self.cfg))  # nothing seen yet
-        self.app.S["last_fg"] = "game.exe"
-        self.assertTrue(self.app.exclude_current(self.cfg))
+    def test_shell_verb_toggles_by_file_and_the_tray_picks_it_up(self):  # A3: Explorer "Don't use murmur in this app"
+        from murmur import shellmenu
+        ov = mock.Mock(); ov.post = lambda fn: fn()
+        self.app._bound.update(cfg=self.cfg, ov=ov, cfg_mtime=None)
+        self.app._watch_config()  # the tray is up: records the mtime, nothing to sync
+        ov.flash.assert_not_called()
+        self.assertEqual(shellmenu.exclude_file(r"C:\Games\Game.EXE"), ("game.exe", True))  # the Explorer verb, another process
         self.assertEqual(self.store.apps_exclude(self.store.load_config()), ["game.exe"])
-        self.assertFalse(self.app.exclude_current(self.cfg))
-        self.assertEqual(self.store.apps_exclude(self.store.load_config()), [])
+        self.assertIn('--exclude "%1"', shellmenu._cmd())
+        import os, time
+        os.utime(self.store.HOME / "config.toml", (time.time() + 5, time.time() + 5))
+        self.app._watch_config()
+        self.assertEqual(self.store.apps_exclude(self.cfg), ["game.exe"])
+        self.assertEqual(ov.flash.call_args.kwargs["label"], "Excluded")
+        self.assertEqual(shellmenu.exclude_file("game.exe"), ("game.exe", False))  # second right-click = back on
+        self.assertEqual(shellmenu.target_name("notes.txt"), "notes.txt")
 
     def test_ignored_uses_exclusion_and_fullscreen(self):
         self.cfg["apps"]["exclude"] = ["game.exe"]

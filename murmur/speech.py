@@ -31,6 +31,9 @@ def count_corrections(raw):
     return len(_CORRECTIONS.findall(raw))
 
 
+FIELDS = ("duration_s", "speech_s", "pauses", "fillers", "self_corrections", "words_raw")  # the per-row keys capture_fields writes
+
+
 def capture_fields(raw, duration_s, vad=None):
     """The history-row keys for one dictation. `vad` is the capture.vad state (speech_s, pauses) when the VAD ran."""
     out = {"duration_s": round(duration_s, 2), "fillers": count_fillers(raw), "self_corrections": count_corrections(raw),

@@ -135,7 +135,7 @@ class Card:
         self.tail_up, self.card_x, self.kind = False, 0, "caret"
         self.st, self.text, self.interim, self.field, self.dest, self.label_o = "listening", "", "", None, "", None
         self.lvl, self._t_last, self._anim = 0.0, time.monotonic(), None  # smoothed level; ("in"|"out", t0)
-        self.prog, self.prog_cap, self.exclude_hook = 0.0, 0.0, None  # loading progress (creeps toward the cap while a step runs); (app_fn, toggle_fn)
+        self.prog, self.prog_cap = 0.0, 0.0  # loading progress; creeps toward the cap while a step runs
         self._col_from, self._col_t0, self._dismiss_id, self._geom, self.level_fn = ACCENT, 0.0, None, "", None
         self.root = r = tk.Tk()
         r.title("murmur card"); r.overrideredirect(True)
@@ -152,7 +152,7 @@ class Card:
                 from .layered import Layered
                 self.lw, self.p, self._view = Layered(win32_hwnd(r)), Painter(self.s), View
                 self.pad, self.layered = self.p.pad, True
-                r.bind("<Button-1>", self._click); r.bind("<Button-3>", self._rclick)
+                r.bind("<Button-1>", self._click)
             except Exception:
                 log.exception("layered card window unavailable, using the chroma-key renderer")
         if not self.layered:
@@ -165,7 +165,7 @@ class Card:
         r.attributes("-alpha", 0.0, "-transparentcolor", KEY)
         r.configure(bg=KEY)
         self.c = tk.Canvas(r, bg=KEY, highlightthickness=0, bd=0)
-        self.c.pack(fill="both", expand=True); self.c.bind("<Button-1>", self._click); self.c.bind("<Button-3>", self._rclick)
+        self.c.pack(fill="both", expand=True); self.c.bind("<Button-1>", self._click)
         ui, semi, mono = pick_fonts(set(tkfont.families()))
         px = lambda n: -round(n * self.s)
         self.f = {"body": tkfont.Font(family=ui, size=px(18)), "chip": tkfont.Font(family=semi, size=px(12.5)),
@@ -238,27 +238,6 @@ class Card:
             self.prog = 1.0
         if self.st != "loading":
             self.flash("loading", text)
-
-    def _rclick(self, e):
-        """Right-click: native popup "Don't use murmur in <app>" for the app in front. exclude_hook = (app_fn -> process name
-        or '', toggle_fn -> now excluded?); the live session (if any) is cancelled through its Escape handler."""
-        if not self.exclude_hook or not (app := self.exclude_hook[0]()):
-            return
-        import tkinter as tk
-
-        def pick():
-            on = self.exclude_hook[1]()
-            if self.recording and (cancel := self.handlers.get("cancel")):
-                cancel()  # posts hide; the notice below lands after it
-
-            def notice():
-                self.recording = False
-                self.flash("done" if on else "undone", f"murmur is off in {app}. Turn it back on in Settings \u203a Config." if on
-                           else f"murmur is back on in {app}.", label="Excluded" if on else "Included")
-            self.root.after(250, notice)
-        m = tk.Menu(self.root, tearoff=0)
-        m.add_command(label=f"Don't use murmur in {app}", command=pick)
-        m.tk_popup(e.x_root, e.y_root)
 
     def release(self):
         """The session is over: keep the card if its state dismisses itself, otherwise hide."""
