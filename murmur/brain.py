@@ -3,7 +3,7 @@ import difflib, logging, re
 from collections import Counter
 from . import llm, phonetic, store
 from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, find_cue, has_scratch,  # noqa: F401  (re-exports)
-                      restore_prose_identifiers, spoken_addresses, spoken_breaks, spoken_command, spoken_forms)
+                      restore_prose_identifiers, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
 from .learn import (clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
                     redictation_terms)
 

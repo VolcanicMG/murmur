@@ -284,9 +284,18 @@ def spoken_addresses(text):
     return _DOMAIN.sub(domain, _EMAIL.sub(email, text))
 
 
+_QUOTE = re.compile(r"(?i)\b(?:open |begin |start )?quote\b[,:]?\s+(?P<q>.+?)[,.]?\s+(?:(?:close|end) quotes?|unquote|quotes? (?:close|closed|end))\b[,.]?")
+
+
+def spoken_quotes(text):
+    """'quote starting end quote' -> '"starting"' (also open/close quote, unquote). The quoted words keep their case; a
+    comma/period the model put right before the closing cue is dropped, one after it is kept."""
+    return _QUOTE.sub(lambda m: '"' + m.group("q").strip() + '"' + (m.group(0)[-1] if m.group(0)[-1] in ".," else ""), text)
+
+
 def spoken_forms(text):
-    """The deterministic pre-LLM rewrites, in order: number self-corrections, paragraph/line breaks, e-mail addresses and URLs."""
-    return spoken_addresses(spoken_breaks(correct_numbers(text)))
+    """The deterministic pre-LLM rewrites, in order: number self-corrections, quotes, paragraph/line breaks, e-mail addresses and URLs."""
+    return spoken_addresses(spoken_breaks(spoken_quotes(correct_numbers(text))))
 
 
 

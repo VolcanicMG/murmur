@@ -38,7 +38,7 @@ def _hooks(sid, mark, retry):
 
     def last_paste():
         return S["last_paste"]
-    return SimpleNamespace(held=held, stop=stop, current=current, done=done, mark=mark, pasted=pasted, last_paste=last_paste, retry=retry, live=lambda: bool(S["session"]))
+    return SimpleNamespace(held=held, stop=stop, current=current, done=done, mark=mark, pasted=pasted, last_paste=last_paste, retry=retry, live=lambda: bool(S["session"]), mic=S.get("mic"))
 
 
 def probe_mic(cfg, ov):
@@ -284,6 +284,8 @@ def quit_app(icon, ov):
         S["session"].cancel()
     S["held"] = False
     ov.post(ov.hide)
+    if S.get("mic"):
+        S["mic"].close()
     _stop_builtin()
     icon.stop()
     ov.post(ov.root.quit)
@@ -407,6 +409,10 @@ def tray_app(cfg, learn, boot, first_run=False):
             ov.post(lambda: ov.flash("failed"))
             return
         _purge_loop(cfg)
+        if store.preroll_s(cfg) > 0:
+            from . import mic
+            S["mic"] = mic.Monitor(lambda: mic.device_index(cfg), store.preroll_s(cfg))
+            S["mic"].start()
         S["ready"] = True
         ov.post(lambda: ov.progress(1.0, f"Hold {keys['dictate']} to dictate."))  # the card finishes the bar, shows Ready and hides itself
         log.info("ready: hold %s to dictate, %s for commands, %s adds the selected word", keys["dictate"], keys["command"], learn_key)

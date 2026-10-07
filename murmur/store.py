@@ -1,5 +1,5 @@
 """~/.murmur files: config, dictionary, snippets, style, history. No win32."""
-import json, os, re, shutil, threading, tomllib
+import json, os, re, shutil, threading, time, tomllib
 from urllib.parse import urlparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -89,6 +89,7 @@ toggle = true  # tap the dictate key (< tap_ms) to latch hands-free recording; t
 tap_ms = 300
 silence_ms = 2000  # hands-free: stop after this much silence once you have spoken
 no_speech_ms = 6000  # hands-free: cancel if nothing is said within this long
+tail_ms = 350  # keep recording this long after the key comes up (the last word is often still in the air)
 
 [code]
 file_tags = "chat"  # "off" | "chat" (AI chat inputs: @path) | "always" (`path` in the editor, @path in chat)
@@ -96,6 +97,8 @@ roots = []  # extra workspace folders to index for file tags
 
 [audio]
 device = ""  # input device name; "" = system default (pick one in Settings > Config)
+preroll_ms = 400  # keep the mic open and include this much audio from before the key went down (0 = open the mic on key-down)
+keep_recordings = 0  # save the last N recordings (+ raw transcript) to ~/.murmur/recordings for model comparisons; 0 = off
 
 [output]
 method = "paste"  # or "type" for apps that block paste
@@ -136,6 +139,28 @@ NO_COPY = ["windowsterminal.exe", "wt.exe", "conhost.exe", "openconsole.exe"]  #
 def no_copy(cfg):
     """Apps where we never send ctrl+c; configs written before `no_copy` existed get the default."""
     return cfg.get("apps", {}).get("no_copy", NO_COPY)
+
+
+def preroll_s(cfg):
+    return max(0, int(cfg.get("audio", {}).get("preroll_ms", 400))) / 1000
+
+
+def tail_s(cfg):
+    return max(0, int(cfg.get("dictation", {}).get("tail_ms", 350))) / 1000
+
+
+def save_recording(audio, raw, keep):
+    """Write float32 16 kHz mono `audio` as recordings/<ts>.wav with <ts>.txt holding the raw transcript; prune to `keep` pairs."""
+    import wave
+    import numpy as np
+    d = HOME / "recordings"; d.mkdir(exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    with wave.open(str(d / f"{ts}.wav"), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+    (d / f"{ts}.txt").write_text(raw + "\n", encoding="utf-8")
+    for old in sorted(d.glob("*.wav"))[:-keep]:
+        old.unlink(missing_ok=True); old.with_suffix(".txt").unlink(missing_ok=True)
 
 
 def apps_exclude(cfg):
@@ -337,7 +362,7 @@ def resolve_device(name, devices):
     return next((i for i, n in ins if n == name), next((i for i, n in ins if low in n.lower()), None))
 
 
-INT_KEYS = ("builtin.gpu_layers", "builtin.ctx", "builtin.port", "privacy.history_days", "learning.style_every", "context.thread_chars", "dictation.tap_ms", "dictation.silence_ms", "dictation.no_speech_ms", "llm.timeout", "llm_fallback.timeout", "context.before_chars", "context.after_chars")
+INT_KEYS = ("audio.preroll_ms", "audio.keep_recordings", "dictation.tail_ms", "builtin.gpu_layers", "builtin.ctx", "builtin.port", "privacy.history_days", "learning.style_every", "context.thread_chars", "dictation.tap_ms", "dictation.silence_ms", "dictation.no_speech_ms", "llm.timeout", "llm_fallback.timeout", "context.before_chars", "context.after_chars")
 INT_MIN = {"builtin.gpu_layers": -1}  # -1 = all layers on the GPU
 HOTKEYS = ("dictate", "command", "fix_last", "learn_word")
 

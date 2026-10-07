@@ -216,3 +216,34 @@ class Workspace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _numpy_or_skip(tc):
+    try:
+        import numpy as np
+        return np
+    except ImportError:
+        tc.skipTest("numpy not installed")
+
+
+class Mic(unittest.TestCase):
+    def test_ring_keeps_the_last_window(self):
+        from murmur import mic
+        r = mic.Ring(0.4)  # 6400 samples
+        for i in range(10):
+            r.push([i] * 1600)  # 100 ms frames
+        got = r.take()
+        self.assertEqual([f[0] for f in got], [6, 7, 8, 9])  # 400 ms = the last four frames
+        self.assertEqual(r.take(), [])  # emptied
+
+    def test_save_recording_prunes(self):
+        import tempfile
+        np = _numpy_or_skip(self)
+        from murmur import store
+        store.HOME = Path(tempfile.mkdtemp())
+        for i in range(4):
+            store.save_recording(np.zeros(1600, np.float32), f"raw {i}", keep=2)
+            import time; time.sleep(1.05)  # distinct timestamps (seconds)
+        wavs = sorted((store.HOME / "recordings").glob("*.wav"))
+        self.assertEqual(len(wavs), 2)
+        self.assertEqual(wavs[-1].with_suffix(".txt").read_text(encoding="utf-8").strip(), "raw 3")

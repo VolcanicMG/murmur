@@ -4,7 +4,7 @@ import keyboard
 from datetime import datetime
 import numpy as np
 import sounddevice as sd
-from . import autolearn, brain, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
+from . import mic, autolearn, brain, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
 
 log = logging.getLogger("murmur")
 UNDO_WINDOW = 60  # seconds after our last paste during which "scratch that" sends ctrl+z
@@ -25,12 +25,10 @@ class Session:
     """hooks: held() key down, stop() end the recording, current() newest session, done() release shared state,
     mark(state) tray icon state, pasted(app, text)/last_paste() = (time, app, text) for spoken undo and editing the last dictation, retry() re-probe the mic."""
 
-    _missing = set()  # device names already warned about
-
     def __init__(self, mode, cfg, ov, hooks):
         self.mode, self.cfg, self.ov = mode, cfg, ov
         self.held, self.stop, self.current, self.done, self.mark = hooks.held, hooks.stop, hooks.current, hooks.done, hooks.mark
-        self.retry = hooks.retry
+        self.retry, self.mic = hooks.retry, getattr(hooks, "mic", None)  # mic: the always-open monitor (pre-roll), or None
         self.live = getattr(hooks, "live", lambda: False)  # is any session running (deferred background work waits)
         self.pasted, self.last_paste = hooks.pasted, hooks.last_paste  # (time, app, text) of the last paste lives in app state across sessions
         self.stream, self.buf = None, []
@@ -80,6 +78,8 @@ class Session:
             if not self._start():
                 return
             self._poll_loop()
+            if not self.cancelled and not self.vad_decision:
+                time.sleep(store.tail_s(self.cfg))  # the word still in the air when the key came up
             self.stream.stop()
             self.t_end = time.time()  # recording length for the speaking metrics
             if self.cancelled or time.time() - self.t0 < 0.3:
@@ -99,6 +99,8 @@ class Session:
                 self._post(lambda: self.ov.state("nothing", "Scratched.", label="Scratched"))  # whole utterance scratched
                 return
             self._decide_password()
+            if not self.sensitive:
+                self._keep_audio()
             self.reader.join(1.0 if self.mode == "command" else 0.4)  # never block dictation on UIA
             if self.sensitive:
                 where = "a password field" if self.password else "this field"
@@ -178,18 +180,26 @@ class Session:
     def _handlers(self):
         return {"cancel": self.cancel, "enter": self.enter, "retry": self.retry}
 
-    def _device(self):
-        """Configured input device index (resolved by name each time; indices shift between boots), None = default."""
-        name = self.cfg.get("audio", {}).get("device", "")
-        idx = store.resolve_device(name, sd.query_devices())
-        if name and idx is None and name not in Session._missing:
-            Session._missing.add(name); log.warning("input device %r not found, using the default", name)
-        return idx
+    def _keep_audio(self):
+        """[audio] keep_recordings > 0: save this recording (+ its raw transcript) for model comparisons. Never in private mode."""
+        keep = self.cfg.get("audio", {}).get("keep_recordings", 0)
+        if not keep or store.is_private(self.cfg) or not self.buf:
+            return
+        try:
+            store.save_recording(np.concatenate(self.buf)[:, 0], self.raw, keep)
+        except Exception:
+            log.exception("keeping the recording failed")
 
     def _start(self):
         try:
-            self.stream = sd.InputStream(samplerate=16000, channels=1, dtype="float32", callback=self._audio, device=self._device())
-            self.stream.start()  # first, so the first syllable isn't clipped
+            pre = self.mic.attach(self._audio) if self.mic else None
+            if pre is not None:
+                for f in pre:
+                    self._audio(f)  # the pre-roll: what the mic heard just before the key went down
+                self.stream = mic.Attached(self.mic)
+            else:
+                self.stream = sd.InputStream(samplerate=16000, channels=1, dtype="float32", callback=self._audio, device=mic.device_index(self.cfg))
+                self.stream.start()  # first, so the first syllable isn't clipped
         except Exception:
             log.exception("microphone unavailable")
             self.failed, self.stream = True, None

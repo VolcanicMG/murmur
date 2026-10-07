@@ -302,6 +302,14 @@ class T(unittest.TestCase):
         self.assertEqual(a("it is actually fine"), "it is actually fine")
         self.assertEqual(a("version 1.2 actually 1.3 and then 2.0 actually 2.1"), "version 1.3 and then 2.1")
 
+    def test_spoken_quotes(self):
+        q = brain.spoken_quotes
+        self.assertEqual(q("a grey quote Starting end quote card"), 'a grey "Starting" card')
+        self.assertEqual(q("he said open quote we are done close quote. Then left"), 'he said "we are done". Then left')
+        self.assertEqual(q("quote hello, unquote, and more"), '"hello", and more')
+        self.assertEqual(q("I will quote you on that"), "I will quote you on that")  # no closing cue: left alone
+        self.assertEqual(brain.spoken_forms("say quote forty two end quote now"), 'say "forty two" now')  # runs inside spoken_forms
+
     def test_spoken_breaks(self):  # E2
         a = brain.apply_scratch
         self.assertEqual(a("first point done new paragraph second point done"), "first point done\n\nsecond point done")
