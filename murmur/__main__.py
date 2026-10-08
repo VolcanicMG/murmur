@@ -144,8 +144,8 @@ def main():
         from . import win
         win.dpi_aware()  # before any window exists
     ap = argparse.ArgumentParser(prog="murmur", description="Local voice dictation")
-    ap.add_argument("cmd", nargs="?", choices=["learn", "fetch-model", "fetch-vad"], help="learn: rebuild style.md from history; fetch-model / fetch-vad: download the speech model / Silero VAD into the build folder")
-    ap.add_argument("dest", nargs="?", help="with fetch-model / fetch-vad: target folder (default packaging/models/parakeet or /silero)")
+    ap.add_argument("cmd", nargs="?", choices=["learn", "fetch-model", "fetch-vad", "seal"], help="learn: rebuild style.md from history; fetch-model / fetch-vad: download the speech model / Silero VAD into the build folder; seal: encrypt plaintext history and recordings (+ DIRs)")
+    ap.add_argument("dest", nargs="*", help="with fetch-model / fetch-vad: target folder (default packaging/models/parakeet or /silero); with seal: extra folders of recordings")
     ap.add_argument("--settings", nargs="?", const="History", metavar="TAB", help="open the settings window only (optionally on TAB)")
     ap.add_argument("--demo-card", nargs="?", const="", metavar="STATE", help="show the caption card with fake data (cycles states, or freezes STATE)")
     ap.add_argument("--demo-tray", metavar="STATE", help="save the tray icon for STATE to ~/.murmur/shots/")
@@ -160,11 +160,17 @@ def main():
         from . import __version__
         print(__version__); return
     if a.cmd == "fetch-model":  # build step: no ~/.murmur needed
-        print(stt.fetch(a.dest)); return
+        print(stt.fetch(a.dest[0] if a.dest else None)); return
     if a.cmd == "fetch-vad":
         from . import vad
-        print(vad.fetch(a.dest)); return
+        print(vad.fetch(a.dest[0] if a.dest else None)); return
     first_run = store.ensure()  # True when config.toml did not exist: the tray app opens the setup window once
+    if a.cmd == "seal":
+        from . import seal
+        if not seal.available():
+            raise SystemExit("seal needs Windows DPAPI: run it with the Windows venv")
+        rows, files = store.seal_existing(a.dest)
+        print(f"sealed {rows} history rows and {files} recording files"); return
     if a.exclude or a.shell_menu:
         return shell_verb(a)
     if a.selftest:
@@ -198,6 +204,7 @@ def main():
             return
     if cfg.get("context", {}).get("enabled", True) and not store.local_only(cfg):  # "builtin" and localhost openai count as local
         log.warning("[context] enabled with a remote LLM provider (primary or fallback): text around your cursor is sent to it")
+    threading.Thread(target=store.seal_existing, daemon=True).start()  # one-time migration of pre-encryption files; idempotent
     from .app import tray_app
     tray_app(cfg, learn, boot, first_run=first_run)
 

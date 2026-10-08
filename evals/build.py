@@ -3,8 +3,11 @@ python -m evals.build --recordings [DIR]: append every kept recording (~/.murmur
 yet to evals/cases/local/recordings.jsonl as an `audio` case whose `expected` is the draft transcript murmur heard, and copies
 the wav into evals/cases/local/audio (keep_recordings prunes its folder; the suite must keep its takes). Correct `expected` to
 what you actually said (and add checks); until then the case only guards against regressions."""
-import argparse, json, shutil
+import argparse, json, shutil, sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from murmur import seal  # noqa: E402  (history and recordings are sealed with DPAPI on Windows)
 
 HERE = Path(__file__).parent
 CANDIDATES = [Path.home() / ".murmur/history.jsonl", Path("/mnt/c/Users/ethan/.murmur/history.jsonl")]
@@ -14,7 +17,7 @@ REC_CANDIDATES = [Path.home() / ".murmur/recordings", Path("/mnt/c/Users/ethan/.
 def draft_case(w):
     """A draft audio case for one kept recording: expected = the transcript murmur heard (its .txt sidecar)."""
     txt = w.with_suffix(".txt")
-    heard = txt.read_text(encoding="utf-8").strip() if txt.exists() else ""
+    heard = seal.unseal(txt.read_bytes()).decode("utf-8").strip() if txt.exists() else ""
     return {"id": f"rec-{w.stem}", "kind": "audio", "wav": w.name, "tone": "casual", "expected": heard,
             "checks": {"max_wer": 0.15}, "reviewed": False, "note": "draft: expected = what murmur heard; correct it"}
 
@@ -31,7 +34,7 @@ def add_recordings(rec_dir):
     new = recording_cases(rec_dir, have)
     (keep := HERE / "cases/local/audio").mkdir(exist_ok=True)
     for c in new:
-        shutil.copy2(Path(rec_dir) / c["wav"], keep / c["wav"])
+        shutil.copy2(Path(rec_dir) / c["wav"], keep / c["wav"])  # still sealed: run.py unseals it on use
     with open(out, "a", encoding="utf-8") as f:
         f.writelines(json.dumps(c, ensure_ascii=False) + "\n" for c in new)
     print(f"{len(new)} new audio cases ({len(have)} already there) -> {out}")
@@ -56,11 +59,17 @@ def main():
         rec = Path(a.recordings) if a.recordings else next((p for p in REC_CANDIDATES if p.exists()), None)
         if not rec:
             raise SystemExit("no recordings folder found")
-        return add_recordings(rec)
+        try:
+            return add_recordings(rec)
+        except seal.SealedError as e:
+            raise SystemExit(str(e))
     src = Path(a.history) if a.history else next((p for p in CANDIDATES if p.exists()), None)
     if not src:
         raise SystemExit("no history.jsonl found")
-    rows = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
+    try:
+        rows = [json.loads(seal.open_line(l)) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except seal.SealedError as e:
+        raise SystemExit(f"{src}: {e}")
     cases = [c for c in (history_case(i, r) for i, r in enumerate(rows)) if c]
     out = HERE / "cases/local/history.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)

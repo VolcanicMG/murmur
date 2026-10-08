@@ -233,7 +233,7 @@ def _learn_word(cfg, ov):
         text = None if got is None else brain.clean_word(got)
     finally:
         _learn_lock.release()
-    log.info("learn_word: selection %r", text)
+    log.info("learn_word: selection %s", "unreadable" if text is None else f"{len(text)} chars")
     if text is None:
         flash = ("nothing", "Release the keys and try again.", "Keys held")
     elif not text:
@@ -327,6 +327,10 @@ def rebind_hotkeys(cfg):
         _bound["cfg"] = cfg
         return False
     S["pending_rebind"] = False
+    bad = [m for m, v in cfg["hotkeys"].items() if not store.hotkey_ok(v, m)]
+    if bad:
+        log.warning("hotkeys not re-bound, invalid: %s (keeping the old ones)", ", ".join(bad))
+        return False  # unhooking first would leave every hotkey dead until restart
     _unregister(_bound["removers"])
     S["keys"], _bound["learn_key"], _bound["removers"] = _register(cfg, _bound["ov"], _bound["mark"])
     log.info("hotkeys re-bound: dictate=%s command=%s", S["keys"]["dictate"], S["keys"]["command"])

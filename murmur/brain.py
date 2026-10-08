@@ -211,11 +211,8 @@ def clean_checked(raw, ctx, retry=True, shortcut=True):
         if plausible(raw, stripped) or (stripped != out and not stripped.strip()):  # only snippet tokens is fine
             return apply_snippets(out, snippets), True
         where = "" if len(attempts) == 1 else f"/{len(attempts)}"
-        if ctx.get("private"):  # private mode or a sensitive field: scores and sizes only, never the text
-            log.warning("cleanup rejected, attempt %d%s (coverage=%.2f novelty=%.2f) raw=%d chars output=%d chars", n, where,
-                        *_scores(raw, out)[:2], len(raw), len(out))
-        else:
-            log.warning("cleanup rejected, attempt %d%s (coverage=%.2f novelty=%.2f): raw=%r output=%r", n, where, *_scores(raw, out)[:2], raw, out)
+        log.warning("cleanup rejected, attempt %d%s (coverage=%.2f novelty=%.2f) raw=%d chars output=%d chars", n, where,
+                    *_scores(raw, out)[:2], len(raw), len(out))  # sizes only: the log is never encrypted
     return tidy_raw(raw), False
 
 
@@ -380,8 +377,7 @@ def rewrite_checked(selection, instruction, ctx, target="selection"):
         out = tidy_edges(rewrite(selection, instruction, ctx, target, strict), selection)
         if command_ok(selection, instruction, out):
             return out, True
-        log.warning("command output rejected (strict=%s) instruction=%s", strict,
-                    f"{len(instruction)} chars" if ctx.get("private") else repr(instruction))
+        log.warning("command output rejected (strict=%s) instruction=%d chars", strict, len(instruction))
     return "", False
 
 

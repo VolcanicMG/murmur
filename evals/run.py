@@ -2,7 +2,7 @@
 Runs the REAL brain.py functions (apply_scratch -> clean_auto -> fit, plausible, command_intent) against case files.
 No win32; works on Linux. --no-llm runs only the deterministic kinds. `audio` cases (kept recordings, see evals/build.py
 --recordings) also run the speech model, so they need the Windows venv."""
-import argparse, json, re, statistics, sys, tempfile, time
+import argparse, collections, json, re, statistics, sys, tempfile, time
 from datetime import datetime, timezone
 from pathlib import Path
 from murmur import brain, llm, store
@@ -44,16 +44,32 @@ def wer(ref, hyp):
     return d[-1] / max(len(r), 1)
 
 
+def names(text):
+    """Words that look like names or jargon: mixed case ("GitHub", "LM") or capitalised mid-sentence ("Nguyen"); not "I"/"I'm"."""
+    out, start = [], True
+    for tok in text.split():
+        w = re.sub(r"^[^A-Za-z]+|[^A-Za-z0-9'’]+$", "", tok)
+        title = w in ("Dr", "Mr", "Mrs", "Ms", "St")
+        if w and not title and (any(c.isupper() for c in w[1:]) or (not start and w[0].isupper())) and w != "I" \
+                and not w.startswith(("I'", "I’")):
+            out.append(w)
+        start = bool(re.search(r"[.!?:][\"'”)]*$", tok)) and not title
+    return out
+
+
+def missed_names(expected, out):
+    """names() of the expected text that the output doesn't contain (case-sensitive: "Lm" is not "LM")."""
+    have = set(re.findall(r"[A-Za-z][A-Za-z0-9'’]*", out))
+    return list(dict.fromkeys(n for n in names(expected) if n not in have))
+
+
 def hear(case):
     """(raw transcript, decode seconds) for an audio case, the way Session.transcribe does it (whole take, speech gate)."""
     if case["wav"] not in _heard:
-        import wave
-        import numpy as np
         from murmur import audio, stt
         if stt._model is None:
             stt.load_model(store.load_config())
-        with wave.open(str(RECORDINGS / case["wav"])) as f:
-            x = np.frombuffer(f.readframes(f.getnframes()), np.int16).astype(np.float32) / 32768
+        x = store.load_recording(RECORDINGS / case["wav"])[0]  # sealed takes need the Windows venv
         t = time.perf_counter()
         _heard[case["wav"]] = (stt.recognize(x) if audio.has_speech(x) else "", round(time.perf_counter() - t, 3))
     return _heard[case["wav"]]
@@ -170,6 +186,7 @@ def run_once(c, cfg, i):
     out, info = run_case(c, cfg)
     if c["kind"] == "audio":
         info["wer_raw"], info["wer"] = round(wer(c["expected"], c["raw"]), 3), round(wer(c["expected"], out), 3)
+        info["missed"] = missed_names(c["expected"], out)
     res = {k: check(k, v, c, out) for k, v in c.get("checks", {}).items()}
     return {"id": c["id"], "kind": c["kind"], "run": i, "output": out, "checks": res, "pass": all(res.values()) and "error" not in info, **info}
 
@@ -224,8 +241,14 @@ def audio_lines(runs):
     if not a:
         return []
     mean = lambda k: sum(r[k] for r in a) / len(a)
-    return [f"audio: WER heard {pct(mean('wer_raw'))} -> final {pct(mean('wer'))}  "
-            f"decode median {statistics.median(r['stt_s'] for r in a):.2f}s  ({len(a)} runs)"]
+    lines = [f"audio: WER heard {pct(mean('wer_raw'))} -> final {pct(mean('wer'))}  "
+             f"decode median {statistics.median(r['stt_s'] for r in a):.2f}s  ({len(a)} runs)"]
+    takes = collections.Counter(n for _, n in {(r["id"], n) for r in a for n in r.get("missed", [])})
+    if takes:
+        known = {w.lower() for t in store.load_dictionary() for w in t.split()}
+        lines.append("names missed in the final text (dictionary candidates; * = already in it, so matching missed): " + ", ".join(
+            f"{n}{'*' if n.lower() in known else ''} ({k} take{'s' * (k > 1)})" for n, k in takes.most_common()))
+    return lines
 
 
 def summarize(runs, cases):
@@ -260,6 +283,7 @@ def main():
         store.HOME = Path(tempfile.mkdtemp(prefix="murmur-eval-"))
     store.ensure()
     if a.prompt_file:
+        store.OLD_PROMPTS.clear()  # an old shipped default passed on purpose must be tested as-is
         (store.HOME / "prompt.md").write_text(Path(a.prompt_file).read_text(encoding="utf-8"), encoding="utf-8")
     cfg = store.load_config()
     if not a.real_home:  # stable baseline whatever the shipped default provider is: LM Studio + gemma unless overridden

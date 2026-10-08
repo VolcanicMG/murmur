@@ -82,9 +82,9 @@ class Phonetic(unittest.TestCase):
 
 
 class PrivateLogs(unittest.TestCase):  # R7
-    def test_rejected_cleanup_logs_only_sizes_when_private(self):
+    def test_rejected_cleanup_logs_only_sizes(self):
         brain._chat = lambda *a: "Totally unrelated invented content about elephants and tractors."
-        for private, leaks in ((True, False), (False, True)):
+        for private, leaks in ((True, False), (False, False)):  # the log is never encrypted: sizes only, private or not
             ctx = {"cfg": {"llm": {}}, "tone": "neutral", "private": private}
             with self.assertLogs("murmur", "WARNING") as cm:
                 brain.clean_checked("my secret passphrase is hunter two", ctx, retry=False)
@@ -282,3 +282,10 @@ class AcronymsAndPlurals(unittest.TestCase):  # review 10-07
         for s in ("I run two pod steads now", "LM Studios are great", "AI studios", "see the obs studios", "the jason apis",
                   "the film studios were busy", "Helm Studio charts"):
             self.assertEqual(self.fix(s), s, s)
+
+
+class ReplayNameMisses(unittest.TestCase):
+    def test_missed_names(self):
+        from evals import run
+        self.assertEqual(run.names("I'm on GitHub. Ask Dr. Nguyen about LM Studio."), ["GitHub", "Nguyen", "LM", "Studio"])
+        self.assertEqual(run.missed_names("Ask Dr. Nguyen about LM Studio.", "Ask Dr. Win about Lm Studio."), ["Nguyen", "LM"])

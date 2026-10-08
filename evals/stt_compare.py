@@ -8,15 +8,14 @@ Each model is NAME[:QUANT] (downloads to the HF cache) or a folder path. Every m
 audio.condition(take) (what the app feeds the model); --no-condition skips the second. The first line per take is the raw
 transcript murmur produced at the time (the .txt sidecar). With --ref FILE (one line per take, in order) a word error rate is
 printed per model and variant."""
-import argparse, re, sys, time, wave
+import argparse, re, sys, time
 from pathlib import Path
 
-import numpy as np
 import onnx_asr
 
 DEFAULT = ["nemo-parakeet-tdt-0.6b-v2:int8", "nemo-parakeet-tdt-0.6b-v3:int8", "nemo-parakeet-tdt-0.6b-v3"]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from murmur import audio  # noqa: E402  (the conditioning the app applies before decoding)
+from murmur import audio, store  # noqa: E402  (audio: the conditioning the app applies before decoding)
 
 
 def load(spec):
@@ -58,9 +57,7 @@ def main():
     variants = [("raw", lambda x: x)] + ([] if a.no_condition else [("cond", audio.condition)])
     outs = {f"{spec} {v}": [] for spec in models for v, _ in variants}
     for i, w in enumerate(wavs):
-        with wave.open(str(w)) as f:
-            take = np.frombuffer(f.readframes(f.getnframes()), np.int16).astype(np.float32) / 32768
-        raw = w.with_suffix(".txt").read_text(encoding="utf-8").strip() if w.with_suffix(".txt").exists() else ""
+        take, raw = store.load_recording(w)
         print(f"\n== {w.name} ({len(take) / 16000:.1f}s)")
         if i < len(refs):
             print(f"   ref : {refs[i]}")

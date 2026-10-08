@@ -99,7 +99,7 @@ class Session:
             self.raw = self._compose(transcribe(self.buf))
             self.marks["heard"] = time.monotonic()
             if self.raw and not self.committed and capture.hallucinated(self.raw, self.vad["speech_s"]):
-                log.info("dropped %r: %.2f s of speech detected", self.raw, self.vad["speech_s"])
+                log.info("dropped %d words: %.2f s of speech detected", len(self.raw.split()), self.vad["speech_s"])
                 self.raw = ""
             if not self.raw:
                 if self.vad_decision == "cancel" or self.vad["speech_s"] < capture.MIN_SPEECH_S:  # nothing was said: only now discard
@@ -304,7 +304,7 @@ class Session:
             terms = store.load_dictionary() + list(self.ctx.get("terms", []))
         w, hard = brain.prepare(r, self.ctx, terms)
         if hard:
-            log.info("phonetic: %s", f"{len(hard)} replacement(s)" if self.private else ", ".join(f"{a} -> {b}" for a, b in hard))
+            log.info("phonetic: %d replacement(s)", len(hard))
         return w
 
     PW_WAIT = 1.5  # seconds to wait for the IsPassword verdict at release

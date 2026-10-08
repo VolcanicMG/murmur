@@ -282,5 +282,32 @@ class T(unittest.TestCase):
         self.assertEqual([h["ts"] for h in store.read_history()], ["2"])
 
 
+@unittest.skipUnless(__import__("importlib").util.find_spec("keyboard"), "keyboard not installed")
+class HotkeyValidation(unittest.TestCase):
+    def test_form_rejects_a_half_typed_hotkey(self):
+        self.assertTrue(store.hotkey_ok("right ctrl") and store.hotkey_ok("ctrl+alt+m"))
+        self.assertFalse(store.hotkey_ok("ctrl+") or store.hotkey_ok("right c"))
+        self.assertTrue(store.hotkey_ok("right ctrl", "dictate") and store.hotkey_ok("f8", "command"))
+        self.assertFalse(store.hotkey_ok("ctrl+d", "dictate"))  # hooked as one key: a combo would kill every hotkey
+        with self.assertRaises(ValueError):
+            store._text_field("hotkeys.dictate", "ctrl+", {}, {})
+
+
+@unittest.skipUnless(__import__("importlib").util.find_spec("tkinter"), "tkinter not installed")
+class ConfigAutosave(unittest.TestCase):
+    def test_saves_changes_once_and_waits_for_text_fields(self):
+        from types import SimpleNamespace
+        from murmur import settings
+        st, saves = SimpleNamespace(saved="a"), []
+        tick = lambda now, editing=False: settings.autosave_tick(st, now, editing, lambda: saves.append(now))
+        tick("a")  # unchanged
+        tick("b", editing=True)  # mid-typing in a field: wait
+        self.assertEqual(saves, [])
+        tick("b"); tick("b")  # left the field: one save, not one per poll
+        self.assertEqual(saves, ["b"])
+        tick("bad"); tick("bad")  # a value the form rejects is tried once, not every 500 ms
+        self.assertEqual(saves, ["b", "bad"])
+
+
 if __name__ == "__main__":
     unittest.main()

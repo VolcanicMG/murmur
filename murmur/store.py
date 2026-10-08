@@ -1,9 +1,11 @@
 """~/.murmur files: config, dictionary, snippets, style, history. No win32."""
-import json, os, re, shutil, threading, time, tomllib
+import hashlib, json, os, re, shutil, threading, time, tomllib
 from urllib.parse import urlparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from . import seal
 
 HOME = Path.home() / ".murmur"  # tests repoint this
 _hist_lock = threading.Lock()  # session thread appends while fix-last rewrites
@@ -161,23 +163,46 @@ def keep_take(cfg, frames, raw, hold_s):
         import numpy as np
         x = np.concatenate(frames)[:, 0]
         save_recording(x, raw, keep)
-        log.info("kept recording: %.1f s of audio for a %.1f s hold, raw=%r", len(x) / 16000, hold_s, raw)
+        log.info("kept recording: %.1f s of audio for a %.1f s hold", len(x) / 16000, hold_s)
     except Exception:
         log.exception("keeping the recording failed")
 
 
 def save_recording(audio, raw, keep):
-    """Write float32 16 kHz mono `audio` as recordings/<ts>.wav with <ts>.txt holding the raw transcript; prune to `keep` pairs."""
-    import wave
+    """Write float32 16 kHz mono `audio` as recordings/<ts>.wav with <ts>.txt holding the raw transcript, both sealed;
+    prune to `keep` pairs."""
+    import io, wave
     import numpy as np
     d = HOME / "recordings"; d.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
-    with wave.open(str(d / f"{ts}.wav"), "wb") as w:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
         w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
-    (d / f"{ts}.txt").write_text(raw + "\n", encoding="utf-8")
+    (d / f"{ts}.wav").write_bytes(seal.seal(buf.getvalue()))
+    (d / f"{ts}.txt").write_bytes(seal.seal((raw + "\n").encode("utf-8")))
     for old in sorted(d.glob("*.wav"))[:-keep]:
         old.unlink(missing_ok=True); old.with_suffix(".txt").unlink(missing_ok=True)
+
+
+def clear_recordings():
+    """Delete every kept recording (.wav + .txt, and any .tmp a migration left). Returns how many takes were removed."""
+    d = HOME / "recordings"
+    files = [f for f in d.glob("*") if f.suffix in (".wav", ".txt", ".tmp")] if d.is_dir() else []
+    for f in files:
+        f.unlink(missing_ok=True)
+    return sum(f.suffix == ".wav" for f in files)
+
+
+def load_recording(wav_path):
+    """(float32 16 kHz mono samples, raw transcript) of a kept recording, sealed or plain; "" when there is no .txt."""
+    import io, wave
+    import numpy as np
+    wav_path = Path(wav_path)
+    with wave.open(io.BytesIO(seal.unseal(wav_path.read_bytes()))) as f:
+        x = np.frombuffer(f.readframes(f.getnframes()), np.int16).astype(np.float32) / 32768
+    txt = wav_path.with_suffix(".txt")
+    return x, seal.unseal(txt.read_bytes()).decode("utf-8").strip() if txt.exists() else ""
 
 
 def apps_exclude(cfg):
@@ -209,7 +234,9 @@ DEFAULT_SNIPPETS = '[snippets]\nsig = "Best,\\nEthan"\n'
 
 
 DEFAULT_FILES = {"config.toml": DEFAULT_CONFIG, "snippets.toml": DEFAULT_SNIPPETS,
-                 "dictionary.txt": "# one preferred spelling per line\n", "prompt.md": DEFAULT_PROMPT}
+                 "dictionary.txt": "# one preferred spelling per line\n"}
+# sha256[:16] of shipped DEFAULT_PROMPTs (stripped) that ensure() or "Reset to default" wrote to prompt.md, freezing those rules
+OLD_PROMPTS = {"638f487ce09c9707", "a839e5675f0a9741", "5a0abbb3eecc4a45"}
 
 
 def ensure():
@@ -226,8 +253,19 @@ def load_config():
 
 
 def load_prompt():
+    """prompt.md if the user edited it, else the current DEFAULT_PROMPT (also for an untouched copy of an older default)."""
     p = HOME / "prompt.md"
-    return p.read_text(encoding="utf-8").strip() if p.exists() else DEFAULT_PROMPT.strip()
+    text = p.read_text(encoding="utf-8").strip() if p.exists() else ""
+    return text if text and hashlib.sha256(text.encode()).hexdigest()[:16] not in OLD_PROMPTS else DEFAULT_PROMPT.strip()
+
+
+def save_prompt(text):
+    """Write prompt.md, or remove it when the text is the default, so later default improvements still apply."""
+    p = HOME / "prompt.md"
+    if text.strip() == DEFAULT_PROMPT.strip():
+        p.unlink(missing_ok=True)
+    else:
+        p.write_text(text.strip() + "\n", encoding="utf-8")
 
 
 def load_snippets():
@@ -260,7 +298,7 @@ def load_style():
 
 def append_history(entry):
     with _locked(), open(HOME / "history.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.write(seal.seal_line(json.dumps(entry, ensure_ascii=False)) + "\n")
 
 
 def read_history(n=None):
@@ -269,29 +307,40 @@ def read_history(n=None):
     return [{"mode": "dictate", **r} for r in rows]  # rows from before command-mode logging have no mode
 
 
-def _read_history_unlocked(n=None):
+def _read_history_unlocked(n=None, unreadable=None):
+    """Rows of history.jsonl; torn/corrupt lines are skipped. Sealed lines that can't be opened here (DPAPI refused, or no
+    DPAPI) are appended verbatim to `unreadable` when given, so a rewrite can carry them over instead of dropping them."""
     p = HOME / "history.jsonl"
     if not p.exists():
         return []
     rows = []
-    for l in p.read_text(encoding="utf-8").splitlines():
+    for l in reversed(p.read_text(encoding="utf-8").splitlines()):  # newest first, so read_history(n) opens only n lines
+        if n and len(rows) == n:
+            break
         try:
-            rows.append(json.loads(l))
-        except ValueError:
-            pass  # torn/corrupt line
-    return rows[-n:] if n else rows
+            rows.append(json.loads(seal.open_line(l)))
+        except (ValueError, seal.SealedError):
+            if unreadable is not None and l.startswith("!"):
+                unreadable.insert(0, l)
+    return rows[::-1]
+
+
+def _write_history_unlocked(rows, unreadable=()):
+    """Atomically replace history.jsonl with `unreadable` (kept verbatim) + `rows`, every row sealed. Caller holds _locked()."""
+    tmp = HOME / "history.jsonl.tmp"
+    tmp.write_text("".join(l + "\n" for l in unreadable) + "".join(seal.seal_line(json.dumps(r, ensure_ascii=False)) + "\n" for r in rows),
+                   encoding="utf-8")
+    os.replace(tmp, HOME / "history.jsonl")
 
 
 def _edit_row(ts, final, change):
     """Apply change(rows, row) to the newest history row matching ts and final, then rewrite atomically."""
     with _locked():
-        rows = _read_history_unlocked()
+        rows = _read_history_unlocked(unreadable=(bad := []))
         for r in reversed(rows):
             if r.get("ts") == ts and r.get("final") == final:
                 change(rows, r)
-                tmp = HOME / "history.jsonl.tmp"
-                tmp.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in rows), encoding="utf-8")
-                os.replace(tmp, HOME / "history.jsonl")
+                _write_history_unlocked(rows, bad)
                 return
 
 
@@ -409,12 +458,30 @@ def _volume_field(v):
     return v
 
 
+def hotkey_ok(v, key=None):
+    """Can app._register bind this? dictate/command are hooked as ONE key (on_press_key: no combos); the rest are
+    add_hotkey combos. True where the keyboard lib isn't installed (Linux tests)."""
+    try:
+        import keyboard
+    except ImportError:
+        return True
+    try:
+        if key in ("dictate", "command"):
+            return "+" not in v and bool(keyboard.key_to_scan_codes(keyboard.normalize_name(v)))
+        keyboard.parse_hotkey(v)
+        return True
+    except (ValueError, KeyError):
+        return False
+
+
 def _text_field(path, v, values, base):
     """A stripped string form value: hotkeys can't be empty and URLs must say http (the bundled model has no URL)."""
     v = v.strip()
     sec, key = path.split(".")
     if sec == "hotkeys" and not v:
         raise ValueError(f"hotkey {key} can't be empty")
+    if sec == "hotkeys" and not hotkey_ok(v, key):
+        raise ValueError(f"hotkey {key} can't be {v!r}" + (" (one key, no combination)" if key in ("dictate", "command") else ""))
     tbl = "llm_fallback" if path == "llm_fallback.url" else "llm"
     builtin = (values.get(f"{tbl}.provider") or base.get(tbl, {}).get("provider")) == "builtin"
     if path in ("llm.url", "llm_fallback.url") and not builtin and not v.startswith("http"):
@@ -494,9 +561,7 @@ def clear_history():
     """Delete every history row (atomic truncate under the history lock). Returns how many were removed."""
     with _locked():
         n = len(_read_history_unlocked())
-        tmp = HOME / "history.jsonl.tmp"
-        tmp.write_text("", encoding="utf-8")
-        os.replace(tmp, HOME / "history.jsonl")
+        _write_history_unlocked([])
     return n
 
 
@@ -504,11 +569,9 @@ def strip_history_keys(keys):
     """Remove `keys` from every history row (the Speech page's reset: the dictations stay, the speaking metrics start over)."""
     keys = set(keys)
     with _locked():
-        rows = _read_history_unlocked()
+        rows = _read_history_unlocked(unreadable=(bad := []))
         n = sum(1 for r in rows if keys & r.keys())
-        tmp = HOME / "history.jsonl.tmp"
-        tmp.write_text("".join(json.dumps({k: v for k, v in r.items() if k not in keys}, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-        os.replace(tmp, HOME / "history.jsonl")
+        _write_history_unlocked([{k: v for k, v in r.items() if k not in keys} for r in rows], bad)
     return n
 
 
@@ -519,14 +582,49 @@ def purge_history(days, now=None):
         return 0
     cutoff = (now or datetime.now()) - timedelta(days=days)
     with _locked():
-        rows = _read_history_unlocked()
+        rows = _read_history_unlocked(unreadable=(bad := []))
         keep = [r for r in rows if _row_time(r) is None or _row_time(r) >= cutoff]
         if len(keep) == len(rows):
             return 0
-        tmp = HOME / "history.jsonl.tmp"
-        tmp.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in keep), encoding="utf-8")
-        os.replace(tmp, HOME / "history.jsonl")
+        _write_history_unlocked(keep, bad)
     return len(rows) - len(keep)
+
+
+def seal_existing(dirs=()):
+    """Seal what was written before encryption: history.jsonl (if any line is plain) and the .wav/.txt files in recordings/
+    plus `dirs`, each rewritten atomically. Idempotent, never raises; a no-op without DPAPI. Returns (rows, files) sealed."""
+    import logging
+    log = logging.getLogger("murmur")
+    if not seal.available():
+        if os.name == "nt":
+            log.error("win32crypt unavailable: history and recordings are being written UNENCRYPTED")
+        return 0, 0
+    rows = files = 0
+    try:
+        with _locked():
+            p = HOME / "history.jsonl"
+            plain = [l for l in (p.read_text(encoding="utf-8").splitlines() if p.exists() else []) if l.strip() and not l.startswith("!")]
+            if plain:
+                rows_now = _read_history_unlocked(unreadable=(bad := []))
+                _write_history_unlocked(rows_now, bad)
+                rows = len(plain)
+    except Exception:
+        log.exception("sealing history failed")
+    for d in (HOME / "recordings", *map(Path, dirs)):
+        for f in sorted(Path(d).glob("*")) if Path(d).is_dir() else []:
+            try:
+                if f.suffix not in (".wav", ".txt") or seal.is_sealed(data := f.read_bytes()):
+                    continue
+                tmp = f.with_name(f.name + ".tmp")
+                tmp.write_bytes(seal.seal(data))
+                os.replace(tmp, f)
+                files += 1
+            except Exception:
+                log.exception("sealing %s failed", f.name)
+    if rows or files:
+        log.info("sealed %d plaintext history rows and %d recording files", rows, files)
+    read_history()  # warm seal's line cache so the first dictation doesn't decrypt the whole history
+    return rows, files
 
 
 def _row_time(row):

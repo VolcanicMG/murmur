@@ -119,4 +119,4 @@ class HotkeyField(tk.Frame):
         elif res == "esc":
             self.status.set("Recording cancelled.", "info")
         else:
-            self.set(res); self.status.set(f"Captured {res}. Save to apply.", "info")
+            self.set(res); self.status.set(f"Captured {res}.", "info")

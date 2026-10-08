@@ -247,7 +247,7 @@ class Mic(unittest.TestCase):
             import time; time.sleep(1.05)  # distinct timestamps (seconds)
         wavs = sorted((store.HOME / "recordings").glob("*.wav"))
         self.assertEqual(len(wavs), 2)
-        self.assertEqual(wavs[-1].with_suffix(".txt").read_text(encoding="utf-8").strip(), "raw 3")
+        self.assertEqual(store.load_recording(wavs[-1])[1], "raw 3")  # sealed on Windows
 
 
 class Hallucination(unittest.TestCase):

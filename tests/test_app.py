@@ -81,6 +81,12 @@ class Rebind(unittest.TestCase):
             self.app._apply_pending_rebind()
         self.assertEqual((self.app.S["keys"]["dictate"], self.app.S["pending_rebind"]), ("right shift", False))
 
+    def test_invalid_hotkey_keeps_the_old_hooks(self):
+        with mock.patch.object(self.app.store, "hotkey_ok", lambda v, key=None: v != "ctrl+"):
+            self.assertFalse(self.app.rebind_hotkeys(cfg(dictate="ctrl+")))
+        self.assertEqual(len(self.kb.live), 7)  # never unhooked
+        self.assertEqual(self.app.S["keys"]["dictate"], "right ctrl")
+
     def test_not_running_is_a_noop(self):
         self.app._bound["ov"] = None
         self.assertFalse(self.app.rebind_hotkeys(cfg()))

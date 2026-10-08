@@ -386,7 +386,7 @@ def _prompt_page(content, ui):
         _set(text, store.load_prompt())
 
     def save():
-        (store.HOME / "prompt.md").write_text(text.get("1.0", "end").strip() + "\n", encoding="utf-8")
+        store.save_prompt(text.get("1.0", "end"))
 
     def reset():
         _set(text, store.DEFAULT_PROMPT.strip()); save()
@@ -470,6 +470,14 @@ def _show_rows(widgets, on):
         w.grid() if on else w.grid_remove()
 
 
+def autosave_tick(st, now, editing, save):
+    """One poll of the Config form: save when it differs from the last save and no text field is mid-edit. st.saved is set
+    before saving so a value the form rejects isn't retried every tick (load() after a good save resets it)."""
+    if now != st.saved and not editing:
+        st.saved = now
+        save()
+
+
 def _config_page(content, ui, status, after_save, standalone=False):
     """Form of cards over config.toml (Advanced = the raw editor); load() refills every control from disk over defaults."""
     pg = _page(content, ui, "Config", SECTIONS["Config"])
@@ -478,13 +486,18 @@ def _config_page(content, ui, status, after_save, standalone=False):
     hooks = [c(B) for c in cards]  # each returns a post-load hook or None
     raw = _advanced_card(B)
 
+    st = SimpleNamespace(saved=None, editing=False, after=None)
+    snap = lambda: repr({p: w.get() for p, w in B.fields.items()})
+
     def load():
         cfg = store.merged_config()
         for path, w in B.fields.items():
             _load_field(cfg, path, w)
-        raw.load()
+        if not raw.dirty():
+            raw.load()
         for h in hooks:
             h and h()
+        st.saved = snap()
 
     def save_form():
         try:
@@ -501,9 +514,36 @@ def _config_page(content, ui, status, after_save, standalone=False):
         except Exception as e:
             status.set(f"Saved, but the Explorer menu could not be updated: {e}", "error"); return
         after_save()
-    raw.bind_buttons(load)
-    _pills(pg, ui, ("Save", save_form, "primary"), ("Reload", load, "secondary"))
-    _label(pg.bar, ui, "Saving the form rewrites config.toml and drops its comments.").pack(side="left", padx=(B.k(4), 0))
+    def editing():
+        """Focus is in a form text field: wait until the user leaves it (a half-typed hotkey must never be bound). No focus
+        (window inactive) or a dialog keeps the last answer, so alt-tabbing away mid-edit doesn't count as leaving."""
+        try:
+            f = pg.frame.focus_get()
+        except KeyError:
+            return st.editing
+        if f is not None:
+            st.editing = isinstance(f, tk.Entry) and str(f).startswith(str(B.form))
+        return st.editing
+
+    def poll():
+        try:
+            autosave_tick(st, snap(), editing(), save_form)
+        except Exception as e:  # e.g. config.toml locked: say so, keep autosaving
+            status.set(f"Not saved: {e}", "error")
+        finally:
+            st.after = pg.frame.after(500, poll)  # ponytail: polls the form; per-widget change events if this ever shows up in a profile
+
+    def flush():
+        """Window close: stop polling and save what's still in a field."""
+        pg.frame.after_cancel(st.after)
+        autosave_tick(st, snap(), False, save_form)
+    st.after = pg.frame.after(500, poll)
+    pg.flush = flush
+    reload = lambda: (raw.load(), load())  # the Reload pill also discards unsaved raw-editor text
+    raw.bind_buttons(reload)
+    _pills(pg, ui, ("Reload", reload, "secondary"))
+    _label(pg.bar, ui, "Changes save automatically (text fields when you leave them); this rewrites config.toml and drops its comments.").pack(
+        side="left", padx=(B.k(4), 0))
     return pg, load
 
 
@@ -540,7 +580,9 @@ def _load_field(cfg, path, w):
     else:
         sec, key = path.split(".")
         v = cfg.get(sec, {}).get(key)
-        w.set(tomllib.loads(store.DEFAULT_CONFIG).get(sec, {}).get(key, "") if v is None else v)  # keys older configs lack show their default
+        v = tomllib.loads(store.DEFAULT_CONFIG).get(sec, {}).get(key, "") if v is None else v  # keys older configs lack show their default
+        if str(w.get()) != str(v):
+            w.set(v)  # unchanged fields untouched: the reload after an autosave mustn't move the caret
 
 
 def _card(B, title, note=None):
@@ -605,6 +647,11 @@ def _dictation_card(B):
     _number_row(B, g, "audio.preroll_ms", "Pre-roll before the key (ms)"); _hint(B, g, "> 0 keeps the mic running (shows as in use); 0 = warm, started on key-down", _num_w(B))
     _number_row(B, g, "dictation.tail_ms", "Tail after release (ms)")
     _number_row(B, g, "audio.keep_recordings", "Keep last recordings"); _hint(B, g, "~/.murmur/recordings, for model comparisons; 0 = off", _num_w(B))
+
+    def clear_recordings():
+        n = store.clear_recordings()
+        B.status.set(f"Deleted {n} recording{'s' * (n != 1)}.", "success")
+    _row(B, g, None, "Saved recordings", _armed_pill(g, ui, "Delete all recordings", "Click again to delete every recording", clear_recordings))
     _toggle_row(B, g, "ui.sounds", "Sounds")
     lab, _ = _toggle_row(B, g, "ui.start_sound", "Start sound")
     lab.config(padx=k(14)); _label(g, ui, "Plays when recording begins", "small", SECONDARY, FIELD).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(k(60), 0))
@@ -760,7 +807,7 @@ def _advanced_card(B):
     arrow.pack(anchor="w", pady=(k(6), 0)); arrow.bind("<Button-1>", lambda e: toggle_raw())
 
     def load():
-        _set(edit, (store.HOME / "config.toml").read_text(encoding="utf-8")); err.config(text="")
+        _set(edit, (store.HOME / "config.toml").read_text(encoding="utf-8")); err.config(text=""); edit.edit_modified(False)
 
     def save_raw():
         raw_text = edit.get("1.0", "end")
@@ -769,11 +816,12 @@ def _advanced_card(B):
         except tomllib.TOMLDecodeError as e:
             err.config(text=f"Not saved: {e}"); B.status.set("Not saved: config.toml has a syntax error", "error"); return
         (store.HOME / "config.toml").write_text(raw_text, encoding="utf-8")
+        edit.edit_modified(False)
         B.after_save()
 
     def bind_buttons(reload):
         pill(btns, ui, "Save raw", save_raw, "primary").pack(side="left", padx=(0, k(8))); Pill(btns, ui, "Reload", reload).pack(side="left")
-    return SimpleNamespace(load=load, bind_buttons=bind_buttons)
+    return SimpleNamespace(load=load, bind_buttons=bind_buttons, dirty=lambda: bool(edit.edit_modified()))
 
 
 def make_ui():
@@ -821,6 +869,22 @@ def open_settings(root, cfg, fix=None, standalone=False, **where):
     for (pg, load), _ in pages.values():
         load()
     editors += [pages["Tones"][0][1], pages["Config"][0][1]]
+
+    def close():
+        try:
+            pages["Config"][0][0].flush()
+        finally:
+            top.destroy()
+    top.protocol("WM_DELETE_WINDOW", close)
+    def click_away(e):
+        """A click outside the focused text field leaves it (so the config form autosaves it)."""
+        try:
+            f = top.focus_get()
+        except KeyError:
+            return
+        if isinstance(f, tk.Entry) and not isinstance(e.widget, (tk.Entry, tk.Text)):
+            top.focus_set()
+    top.bind("<Button-1>", click_away, add="+")
     tk.Label(side, text="murmur", bg=SIDEBAR, fg=ACCENT, font=ui.fonts["title"], anchor="w").pack(anchor="w", padx=ui.k(20), pady=(ui.k(20), ui.k(14)))
     chips, cur = {}, [None]
 

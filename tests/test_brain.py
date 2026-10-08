@@ -159,6 +159,18 @@ class T(unittest.TestCase):
         self.assertTrue(p.startswith("CUSTOM RULES"))
         self.assertIn("Tone: tweet.", p)
 
+    def test_old_default_prompt_copy_gets_current_default(self):
+        import hashlib
+        old = "OLD SHIPPED RULES"
+        store.OLD_PROMPTS.add(hashlib.sha256(old.encode()).hexdigest()[:16])
+        self.addCleanup(store.OLD_PROMPTS.discard, hashlib.sha256(old.encode()).hexdigest()[:16])
+        (store.HOME / "prompt.md").write_text(old + "\n", encoding="utf-8")
+        self.assertEqual(store.load_prompt(), store.DEFAULT_PROMPT.strip())
+        store.save_prompt(store.DEFAULT_PROMPT)  # "Reset to default" leaves no frozen copy behind
+        self.assertFalse((store.HOME / "prompt.md").exists())
+        store.save_prompt("MINE")
+        self.assertEqual(store.load_prompt(), "MINE")
+
     def test_rewrite_messages(self):
         got = []
         brain._chat = lambda cfg, sys_, user: got.append(user) or "out"
