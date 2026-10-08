@@ -47,6 +47,18 @@ def hallucinated(raw, speech_s):
     return bool(raw) and speech_s < MIN_SPEECH_S and len(raw.split()) <= 3
 
 
+STAGES = (("tail", "release", "stopped"), ("stt", "stopped", "heard"), ("clean", "heard", "cleaned"), ("paste", "cleaned", "pasted"))
+
+
+def stages(marks):
+    """Seconds per stage from monotonic marks (release = key up, stopped = mic off after the tail, heard = transcript,
+    cleaned = final text, pasted = in the app) plus total release -> pasted; a stage whose marks are missing is left out."""
+    out = {name: round(marks[b] - marks[a], 3) for name, a, b in STAGES if a in marks and b in marks}
+    if "release" in marks and "pasted" in marks:
+        out["total"] = round(marks["pasted"] - marks["release"], 3)
+    return out
+
+
 def vad_new():
     return {"t": 0.0, "floor": [], "speech": False, "on": False, "quiet_ms": 0.0, "speech_s": 0.0, "pauses": 0}
 

@@ -240,6 +240,7 @@ class Mic(unittest.TestCase):
         import tempfile
         np = _numpy_or_skip(self)
         from murmur import store
+        self.addCleanup(setattr, store, "HOME", store.HOME)  # never leak a temp HOME into later tests
         store.HOME = Path(tempfile.mkdtemp())
         for i in range(4):
             store.save_recording(np.zeros(1600, np.float32), f"raw {i}", keep=2)
@@ -349,3 +350,10 @@ class SileroStream(unittest.TestCase):
     def test_missing_model_falls_back(self):
         import tempfile
         self.assertIsNone(self.vad.load(tempfile.mkdtemp()))
+
+
+class Stages(unittest.TestCase):
+    def test_stage_seconds_and_total(self):
+        m = {"release": 10.0, "stopped": 10.35, "heard": 10.62, "cleaned": 10.85, "pasted": 10.9}
+        self.assertEqual(capture.stages(m), {"tail": 0.35, "stt": 0.27, "clean": 0.23, "paste": 0.05, "total": 0.9})
+        self.assertEqual(capture.stages({"release": 1.0, "stopped": 1.3}), {"tail": 0.3})  # cancelled early: partial, no total

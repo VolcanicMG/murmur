@@ -1,13 +1,16 @@
 """Replayable evaluation of the murmur cleanup pipeline: python -m evals.run [--cases core|local|all|PATH] [--n 3] ...
 Runs the REAL brain.py functions (apply_scratch -> clean_auto -> fit, plausible, command_intent) against case files.
-No win32; works on Linux. --no-llm runs only the deterministic kinds."""
+No win32; works on Linux. --no-llm runs only the deterministic kinds. `audio` cases (kept recordings, see evals/build.py
+--recordings) also run the speech model, so they need the Windows venv."""
 import argparse, json, re, statistics, sys, tempfile, time
 from datetime import datetime, timezone
 from pathlib import Path
 from murmur import brain, llm, store
 
 HERE = Path(__file__).parent
-LLM_KINDS = {"dictate"}
+LLM_KINDS = {"dictate", "audio", "command"}
+RECORDINGS = HERE / "cases/local/audio"  # build.py --recordings copies takes here (kept recordings get pruned); --recordings overrides
+_heard = {}  # wav name -> (transcript, seconds): the speech model is deterministic, decode each take once per run
 
 
 def load_cases(spec):
@@ -30,6 +33,32 @@ def extra_words(raw, out):
     return [w for w in brain._words(out) if w not in have]
 
 
+def wer(ref, hyp):
+    """Word error rate of hyp against ref over brain._words (numbers normalised, so "2:30" == "two thirty")."""
+    r, h = brain._words(ref), brain._words(hyp)
+    d = list(range(len(h) + 1))
+    for i in range(1, len(r) + 1):
+        prev, d[0] = d[0], i
+        for j in range(1, len(h) + 1):
+            prev, d[j] = d[j], min(d[j] + 1, d[j - 1] + 1, prev + (r[i - 1] != h[j - 1]))
+    return d[-1] / max(len(r), 1)
+
+
+def hear(case):
+    """(raw transcript, decode seconds) for an audio case, the way Session.transcribe does it (whole take, speech gate)."""
+    if case["wav"] not in _heard:
+        import wave
+        import numpy as np
+        from murmur import audio, stt
+        if stt._model is None:
+            stt.load_model(store.load_config())
+        with wave.open(str(RECORDINGS / case["wav"])) as f:
+            x = np.frombuffer(f.readframes(f.getnframes()), np.int16).astype(np.float32) / 32768
+        t = time.perf_counter()
+        _heard[case["wav"]] = (stt.recognize(x) if audio.has_speech(x) else "", round(time.perf_counter() - t, 3))
+    return _heard[case["wav"]]
+
+
 def first_alpha(s):
     return next((c for c in s if c.isalpha()), "")
 
@@ -46,6 +75,7 @@ def check(name, arg, case, out):
     if name == "starts_lower": return first_alpha(out).islower() == arg
     if name == "ends_with": return out.rstrip().endswith(arg)
     if name == "max_extra_words": return len(extra_words(case["raw"], out)) <= arg
+    if name == "max_wer": return wer(case["expected"], out) <= arg
     if name == "is_question": return out.rstrip().endswith("?") == arg
     if name == "empty": return (not out.strip()) == arg
     if name == "lines": return len([l for l in out.splitlines() if l.strip()]) == arg
@@ -70,7 +100,10 @@ def make_ctx(case, cfg):
 
 def run_case(case, cfg):
     """(output, info) for one execution. info: guard decisions + LLM calls [{s}]."""
-    kind, raw, info = case["kind"], case["raw"], {"calls": []}
+    kind, raw, info = case["kind"], case.get("raw", ""), {"calls": []}
+    if kind == "command":
+        from . import command
+        return command.run_command_case(case, cfg)
     if kind == "scratch":
         return brain.apply_scratch(raw), info
     if kind == "fit":
@@ -81,6 +114,9 @@ def run_case(case, cfg):
     if kind == "guard":
         case["_plausible"] = info["plausible"] = brain.plausible(raw, case["output"])
         return case["output"], info
+    if kind == "audio":  # a kept recording: decode it, then the same path as a dictation
+        raw, info["stt_s"] = hear(case)
+        case["raw"] = info["raw"] = raw
     # dictate: mirror Session.finish
     if brain.spoken_command(raw):
         info["command"] = brain.spoken_command(raw)
@@ -132,6 +168,8 @@ def warm_builtin(cfg):
 def run_once(c, cfg, i):
     """One execution of one case as a result row."""
     out, info = run_case(c, cfg)
+    if c["kind"] == "audio":
+        info["wer_raw"], info["wer"] = round(wer(c["expected"], c["raw"]), 3), round(wer(c["expected"], out), 3)
     res = {k: check(k, v, c, out) for k, v in c.get("checks", {}).items()}
     return {"id": c["id"], "kind": c["kind"], "run": i, "output": out, "checks": res, "pass": all(res.values()) and "error" not in info, **info}
 
@@ -180,11 +218,21 @@ def failing_line(rs):
             f"fail={[k for k, v in bad['checks'].items() if not v] or bad.get('error')} out={bad['output']!r}")
 
 
+def audio_lines(runs):
+    """Recording replays: word error rate of what the model heard and of the final text, and decode time."""
+    a = [r for r in runs if r["kind"] == "audio" and "wer" in r]
+    if not a:
+        return []
+    mean = lambda k: sum(r[k] for r in a) / len(a)
+    return [f"audio: WER heard {pct(mean('wer_raw'))} -> final {pct(mean('wer'))}  "
+            f"decode median {statistics.median(r['stt_s'] for r in a):.2f}s  ({len(a)} runs)"]
+
+
 def summarize(runs, cases):
     by_case = {}
     for r in runs:
         by_case.setdefault(r["id"], []).append(r)
-    lines = kind_lines(runs, by_case) + llm_lines(runs)
+    lines = kind_lines(runs, by_case) + llm_lines(runs) + audio_lines(runs)
     worst = sorted((rs for rs in by_case.values() if not all(r["pass"] for r in rs)), key=lambda rs: sum(r["pass"] for r in rs) / len(rs))
     if worst:
         lines += ["\nfailing cases (pass/runs, failed checks, output of a failing run):"] + [failing_line(rs) for rs in worst]
@@ -202,7 +250,11 @@ def main():
     ap.add_argument("--real-home", action="store_true", help="use ~/.murmur (dictionary, style, prompt, history) instead of a fresh temp HOME")
     ap.add_argument("--no-llm", action="store_true", help="deterministic kinds only (no LM Studio needed)")
     ap.add_argument("--min-pass", type=float, help="exit 1 if the overall pass rate (0-1) is below this")
+    ap.add_argument("--recordings", help="folder of the audio cases' wavs (default evals/cases/local/audio)")
     a = ap.parse_args()
+    if a.recordings:
+        global RECORDINGS
+        RECORDINGS = Path(a.recordings)
 
     if not a.real_home:
         store.HOME = Path(tempfile.mkdtemp(prefix="murmur-eval-"))

@@ -48,7 +48,7 @@ class Session:
         self.cancelled = self.failed = self.degraded = self.paste_now = self.kept_raw = False
         self.selection, self.target, self.trailing, self.pasted_ok = "", "new", "", False
         self.latched, self.vad, self.vad_decision, self.label, self.route = False, capture.vad_new(), None, None, "primary"
-        self.committed, self.tag_index, self.silent = "", None, False
+        self.committed, self.tag_index, self.silent, self.marks = "", None, False, {}  # marks: latency stage times (capture.stages)
         self.verdict, self._pw, self._unknown = context.Verdict(), None, False  # password verdict: published early, frozen at release
         self.rms, self.live_route, self.hint = [], "primary", ""  # per-block RMS aligned with buf (forced segment cuts); route of the live clean; the card hint
         self.full = [] if cfg.get("audio", {}).get("keep_recordings", 0) else None  # every frame of the take, for keep_recordings (buf loses committed segments)
@@ -89,13 +89,15 @@ class Session:
             if not self._start():
                 return
             self._poll_loop()
+            self.marks["release"] = time.monotonic()
             if not self.cancelled and not self.vad_decision:
                 time.sleep(store.tail_s(self.cfg))  # the word still in the air when the key came up
             self.stream.stop()
-            self.t_end = time.time()  # recording length for the speaking metrics
+            self.t_end, self.marks["stopped"] = time.time(), time.monotonic()  # recording length for the speaking metrics
             if self.cancelled or time.time() - self.t0 < 0.3:
                 return
             self.raw = self._compose(transcribe(self.buf))
+            self.marks["heard"] = time.monotonic()
             if self.raw and not self.committed and capture.hallucinated(self.raw, self.vad["speech_s"]):
                 log.info("dropped %r: %.2f s of speech detected", self.raw, self.vad["speech_s"])
                 self.raw = ""
@@ -114,13 +116,14 @@ class Session:
                 return
             self._decide_password()
             if not self.sensitive:
-                self._keep_audio()
+                store.keep_take(self.cfg, self.full, self.raw, self.t_end - self.t0)
             self.reader.join(1.0 if self.mode == "command" else 0.4)  # never block dictation on UIA
             if self.sensitive:
                 where = "a password field" if self.password else "this field"
                 self._post(lambda: setattr(self.ov, "dest", f"{where} \u00b7 not saved"))
             self.mark("polishing")
             final = self._finish_command() if self.mode == "command" else self._finish_dictate()
+            self.marks["cleaned"] = time.monotonic()
             if final and self.mode == "dictate" and not self.sensitive:
                 final = brain.fit(self._tag_files(final), self.ctx.get("before", ""), self.ctx.get("tone"))
             if final and not self.cancelled:
@@ -196,18 +199,6 @@ class Session:
 
     def _handlers(self):
         return {"cancel": self.cancel, "enter": self.enter, "retry": self.retry}
-
-    def _keep_audio(self):
-        """[audio] keep_recordings > 0: save this recording (+ its raw transcript) for model comparisons. Never in private mode."""
-        keep = self.cfg.get("audio", {}).get("keep_recordings", 0)
-        if not keep or store.is_private(self.cfg) or not self.full:
-            return
-        try:
-            x = np.concatenate(self.full)[:, 0]
-            store.save_recording(x, self.raw, keep)
-            log.info("kept recording: %.1f s of audio for a %.1f s hold, raw=%r", len(x) / 16000, self.t_end - self.t0, self.raw)
-        except Exception:
-            log.exception("keeping the recording failed")
 
     def _start(self):
         try:
@@ -288,8 +279,9 @@ class Session:
         return "" if cut >= n else transcribe(frames[cut:])
 
     def _paint_raw(self, r):
-        """Tk thread: raw words stream into the card, the last one dimmed as still changing."""
-        if not self.current():
+        """Tk thread: raw words stream into the card, the last one dimmed as still changing. Never after release: a late live
+        clean must not overwrite the Pasted / No speech / Kept your words card."""
+        if not self.current() or "release" in self.marks:
             return
         if self.guarded:  # a password field, or UIA hasn't said it isn't one yet: never put the spoken words on screen
             self.ov.transcript("\u2022" * min(len(r.split()) * 3, 24), "")
@@ -299,8 +291,8 @@ class Session:
         if self.mode == "command":
             self.ov.transcript(f"\u201c{r}\u201d", "")
             return
-        words = r.split()
-        self.ov.transcript(" ".join(words[:-1]), words[-1] if words else "")
+        c_raw, c_text, _, ok = self.cleaned
+        self.ov.transcript(*brain.live_view(r, c_raw if ok else "", c_text))  # cleaned text as it settles, then newer raw words
         if self.ov.st == "listening":
             self.ov.state("transcribing", label=self.label)
 
@@ -366,6 +358,7 @@ class Session:
             text, ok = brain.clean_checked(w, self.ctx, retry=False)  # a rejected live result is never shown, only kept as the raw fallback
             self.live_route = llm.route()
             self.cleaned = (r, text, had_ctx, ok)
+            self._post(lambda: self._paint_raw(self.raw))  # show the settled text now, not at the next poll
         except Exception as e:
             log.info("live clean failed: %s", e)
         finally:
@@ -506,12 +499,17 @@ class Session:
         self.selection = text
         self._label({"selection": f"selection: {len(text)} chars", "last": "editing last dictation", "new": "new text"}[self.target])
         try:
-            out = brain.rewrite(text or None, instruction, self.ctx, self.target)
+            out, ok = brain.rewrite_checked(text or None, instruction, self.ctx, self.target)
         except Exception as e:
             log.info("rewrite failed: %s", e)  # pasting would clobber the selection
             self._cue("error")
             self._post(lambda: self.ov.state("offline", "Rewrite failed; the cleanup model is unavailable."))
             self.cancelled = True  # nothing to paste
+            return None
+        if not ok:  # echo/reply/dropped content: the selection stays untouched
+            self._cue("error")
+            self._post(lambda: self.ov.state("nothing", "Couldn't apply that edit", label="Not applied"))
+            self.cancelled = True
             return None
         if self.target == "new":
             return brain.fit(out, before, self.ctx.get("tone"))
@@ -537,13 +535,16 @@ class Session:
             self._post(lambda: self.ov.state("paste_failed"))
             return
         self._cue("error" if self.degraded or self.kept_raw else "done")
+        self.marks["pasted"] = time.monotonic()
+        lat = capture.stages(self.marks)
+        log.info("timing %s", " ".join(f"{k}={v:.2f}s" for k, v in lat.items()))
         self.pasted_ok = True
         self.pasted(self.app, "" if self.sensitive else final.strip())  # a password is never kept for "edit last"
         if self.private:
             self._post(lambda: self._show_outcome(final))
             return
         entry = {"ts": datetime.now().isoformat(timespec="seconds"), "app": self.app, "title": self.title,
-                 "tone": self.ctx["tone"], "mode": self.mode, "raw": self.raw, "final": final}
+                 "tone": self.ctx["tone"], "mode": self.mode, "raw": self.raw, "final": final, "latency": lat}
         if self.mode == "command":
             entry["selection"], entry["target"] = self.selection, self.target
         else:  # speaking metrics from the heard transcript (never reached for private or sensitive rows)

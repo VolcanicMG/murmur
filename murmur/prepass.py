@@ -93,15 +93,38 @@ def _below100(toks, i):
     return None, i
 
 
-def _number(toks, i):
-    """(digit string, next index) for a spoken number at toks[i], with hundred/thousand multipliers, else (None, i)."""
+def _and_tail(toks, j):
+    """(value, next index) for the 0-99 after 'hundred'/'thousand', allowing 'and' ('two hundred and fifty'), else (None, j)."""
+    k = j + 1 if j < len(toks) and toks[j] == "and" else j
+    tail, n = _below100(toks, k)
+    return (tail, n) if tail is not None else (None, j)
+
+
+def _hundreds(toks, i):
+    """(int 0-9999, next index) for 'fifteen', 'five hundred', 'fifteen hundred', 'two hundred and fifty', else (None, i)."""
     val, j = _below100(toks, i)
     if val is None:
         return None, i
-    for word, mult in (("thousand", 1000), ("hundred", 100)):
-        if j < len(toks) and toks[j] == word:
-            tail, k = _below100(toks, j + 1)
-            val, j = val * mult + (tail or 0), (k if tail is not None else j + 1)
+    if j < len(toks) and toks[j] == "hundred":
+        val, j = val * 100, j + 1
+        tail, k = _and_tail(toks, j)
+        if tail is not None:
+            val, j = val + tail, k
+    return val, j
+
+
+def _number(toks, i):
+    """(digit string, next index) for a spoken number at toks[i] ('one thousand five hundred' -> '1500', 'fifteen hundred'
+    -> '1500'), else (None, i). Hundreds group inside each thousand (it used to multiply the whole total: 100500)."""
+    val, j = _hundreds(toks, i)
+    if val is None:
+        return None, i
+    if j < len(toks) and toks[j] == "thousand":
+        val, j = val * 1000, j + 1
+        k = j + 1 if j < len(toks) and toks[j] == "and" else j
+        rest, n = _hundreds(toks, k)
+        if rest is not None and rest < 1000:
+            val, j = val + rest, n
     return str(val), j
 
 
@@ -331,9 +354,32 @@ def restore_quotes(prepared, final):
     return out
 
 
+_NUMWORDS = r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
+_TECH_UNITS = r"(?:milliseconds?|ms|percent|kilobytes?|megabytes?|gigabytes?|terabytes?|kb|mb|gb|tb|pixels?|px|fps|hz|kilohertz|megahertz|ghz)"
+_PROSE_UNITS = r"(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?|items?|users?|lines?|rows?|files?|tests?|requests?)"
+_UNIT_NUM = re.compile(rf"(?i)\b((?:{_NUMWORDS}(?:[\s-]+and)?[\s-]+)*{_NUMWORDS})(\s+)({_TECH_UNITS}|{_PROSE_UNITS})\b")
+_NUM_BEFORE = re.compile(rf"(?i)(?:\b(?:and|point|minus|{_NUMWORDS})|\d)[\s-]*$")  # the match would be the tail of a longer number
+_SENT_START = re.compile(r"(?:^|[.!?]\s+)$")
+
+
+def digits_before_units(text):
+    """'fifteen hundred milliseconds' -> '1500 milliseconds': a spelled number right before a unit becomes digits when the
+    unit is technical (ms, percent, MB...) or the value is >= 10 ('three seconds' stays words in prose). The words must
+    parse as ONE number (_number), or nothing changes."""
+    def sub(m):
+        toks = m.group(1).lower().replace("-", " ").split()
+        num, j = _number(toks, 0)
+        tech, before = re.fullmatch(_TECH_UNITS, m.group(3), re.I), text[:m.start()]
+        if num is None or j != len(toks) or _NUM_BEFORE.search(before) or (not tech and (int(num) < 10 or _SENT_START.search(before))):
+            return m.group(0)  # not one whole number, part of a longer one, or prose ('three seconds', 'Ten years ago')
+        return num + m.group(2) + m.group(3)
+    return _UNIT_NUM.sub(sub, text)
+
+
 def spoken_forms(text):
-    """The deterministic pre-LLM rewrites, in order: number self-corrections, quotes, paragraph/line breaks, e-mail addresses and URLs."""
-    return spoken_addresses(spoken_breaks(spoken_quotes(correct_numbers(text))))
+    """The deterministic pre-LLM rewrites, in order: number self-corrections, numbers before units, quotes, paragraph/line
+    breaks, e-mail addresses and URLs."""
+    return spoken_addresses(spoken_breaks(spoken_quotes(digits_before_units(correct_numbers(text)))))
 
 
 

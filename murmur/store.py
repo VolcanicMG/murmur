@@ -149,6 +149,23 @@ def tail_s(cfg):
     return max(0, int(cfg.get("dictation", {}).get("tail_ms", 350))) / 1000
 
 
+def keep_take(cfg, frames, raw, hold_s):
+    """[audio] keep_recordings > 0: save a take's audio blocks (+ raw transcript) for evals/model comparisons. Never in private
+    mode (the caller already skips sensitive fields); never raises."""
+    keep = cfg.get("audio", {}).get("keep_recordings", 0)
+    if not keep or is_private(cfg) or not frames:
+        return
+    import logging
+    log = logging.getLogger("murmur")
+    try:
+        import numpy as np
+        x = np.concatenate(frames)[:, 0]
+        save_recording(x, raw, keep)
+        log.info("kept recording: %.1f s of audio for a %.1f s hold, raw=%r", len(x) / 16000, hold_s, raw)
+    except Exception:
+        log.exception("keeping the recording failed")
+
+
 def save_recording(audio, raw, keep):
     """Write float32 16 kHz mono `audio` as recordings/<ts>.wav with <ts>.txt holding the raw transcript; prune to `keep` pairs."""
     import wave

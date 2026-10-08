@@ -265,3 +265,20 @@ class StyleRefresh(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AcronymsAndPlurals(unittest.TestCase):  # review 10-07
+    T = ["LM Studio", "Podstead", "AI Studio", "JSON API", "OBS Studio"]
+
+    def fix(self, s):
+        from murmur import phonetic, brain
+        return phonetic.phonetic_fix(s, self.T, brain.COMMON)[0]
+
+    def test_spoken_acronym_is_fixed(self):
+        self.assertEqual(self.fix("open Elm Studios now"), "open LM Studio now")
+        self.assertEqual(self.fix("Elm studio is open"), "LM Studio is open")
+
+    def test_real_plurals_and_present_terms_are_left_alone(self):
+        for s in ("I run two pod steads now", "LM Studios are great", "AI studios", "see the obs studios", "the jason apis",
+                  "the film studios were busy", "Helm Studio charts"):
+            self.assertEqual(self.fix(s), s, s)

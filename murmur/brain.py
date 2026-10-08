@@ -2,7 +2,7 @@
 import difflib, logging, re
 from collections import Counter
 from . import llm, phonetic, store
-from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, find_cue, has_scratch,  # noqa: F401  (re-exports)
+from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, digits_before_units, find_cue, has_scratch,  # noqa: F401  (re-exports)
                       restore_breaks, restore_prose_identifiers, restore_quotes, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
 from .learn import (clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
                     redictation_terms)
@@ -303,14 +303,86 @@ LAST_FRAME = ("The text below is what the user just dictated. Apply the spoken c
               "corrects (by default the last sentence) with it.")
 
 
-def rewrite(selection, instruction, ctx, target="selection"):
+STRICT = ("\n\nOutput ONLY the edited text itself: keep every word and line the instruction did not name, change nothing else, "
+          "and never describe, answer, introduce or repeat the instruction.")
+
+
+def rewrite(selection, instruction, ctx, target="selection", strict=False):
     """target 'last': the selection is the user's last dictation and the instruction a spoken correction of it."""
     if selection and target == "last":
         user = f"{LAST_FRAME}\n\nDictated text:\n{selection}\n\nSpoken correction: {instruction}"
     else:
         user = (f"Selected text:\n{selection}\n\nInstruction: {instruction}" if selection
                 else f"No selection. Instruction: {instruction}")
-    return apply_snippets(_chat(ctx["cfg"], build_system_prompt(ctx, "command"), user), store.load_snippets())
+    return apply_snippets(_chat(ctx["cfg"], build_system_prompt(ctx, "command") + (STRICT if strict else ""), user), store.load_snippets())
+
+
+_SHRINK = re.compile(r"summar|shorten|shorter|condense|concise|brief|tl;?dr|translat|extract|keep only|only keep|title|headline|key points|"
+                     r"(?:first|last) (?:sentence|line|word|paragraph|item)|one (?:sentence|line|word)|bullet|question|haiku|poem|limerick|"
+                     r"song|tweet|slogan|joke|in (?:spanish|french|german|italian|portuguese|japanese|chinese|korean|russian|dutch|"
+                     r"english|arabic|hindi)", re.I)  # may drop or change most words: no coverage check
+_REWORD = re.compile(r"rewrite|rephrase|reword|paraphrase|formal|casual|professional|friendly|polite|simplif|improve|polish|tone|expand|"
+                     r"fix|correct|grammar|proofread|rhyme|style|sound|more |less ", re.I)  # may change many words
+_REMOVE = re.compile(r"\b(?:remove|delete|drop|cut|take out|get rid of|strip)\b", re.I)
+_EDIT = re.compile(r"\b(?:remove|delete|drop|cut|take out|get rid of|strip|rename|replace|change|swap|move|sort|insert|add|"
+                   r"capitali[sz]e|bold|italic|format|indent|spell)\b", re.I)  # targeted edits keep most of the selection: 50 %
+_REPLY = re.compile(r"(?:here is|here's|here are|certainly|of course|i cannot|i can't|unfortunately|as an ai|"
+                    r"(?:revised|edited|updated|rewritten|new) (?:version|text)|the (?:text|selection|instruction|selected))\b"
+                    r"|.{0,60}\b(?:added|saved) to (?:the|your|my) dictionary", re.I)  # a reply opener, rejected outright
+_SOFT_REPLY = re.compile(r"(?:this is|these are|sure|okay|ok|i've|i have|i can|i'm|sorry)\b.{0,40}?"
+                         r"\b(?:list|text|selection|sentence|paragraph|version|summary|edit|change|rewrite|done|updated)\b", re.I)
+                         # 'Sure, I will look today' is a fine rewrite; 'This is a list of fruits' describes the text
+
+
+def command_ok(selection, instruction, out):
+    """Is `out` a believable edit of `selection` for `instruction`? Rejects an echo of the instruction, a reply or description
+    instead of an edit ('This is a list of...'), and (unless the instruction shrinks/rewrites) dropping the selection's content.
+    Removal instructions may drop the words they name. No selection = generation: only echo and reply are checked."""
+    o, ins = norm_words(out), norm_words(instruction)
+    if not o:
+        return False
+    if o == ins or (len(o) <= len(ins) + 3 and " ".join(ins) in " ".join(o)):
+        return False  # pasted the instruction back
+    sel = selection or ""
+    if not sel.strip():
+        return True  # generation: 'Sure, ...' or "I'm running late" are legitimate new text
+    reply = _REPLY.match(out.strip()) or _SOFT_REPLY.match(out.strip())
+    if reply and not (_REPLY.match(sel.strip()) or _SOFT_REPLY.match(sel.strip())) and norm_words(out)[:2] != norm_words(sel)[:2]:
+        return False
+    if _SHRINK.search(instruction) and not _REMOVE.search(instruction):  # "delete the last item" is not "keep the last item"
+        return True
+    named = set(ins) if _REMOVE.search(instruction) else set()
+    need = set(_words(sel)) - COMMON - named
+    if len(need) < 4:
+        return True  # too little to judge
+    cov = len(need & set(_words(out))) / len(need)
+    return cov >= (0.5 if _EDIT.search(instruction) and not _REWORD.search(instruction) else 0.25)
+
+
+def norm_words(text):
+    return re.findall(r"[a-z0-9]+", text.lower().replace("'", ""))
+
+
+def tidy_edges(out, selection):
+    """Drop the stray leading/trailing space the model adds when the selection had none."""
+    sel = selection or ""
+    if sel.strip() and not sel[:1].isspace():
+        out = out.lstrip(" \t")
+    if sel.strip() and not sel[-1:].isspace():
+        out = out.rstrip(" \t")
+    return out
+
+
+def rewrite_checked(selection, instruction, ctx, target="selection"):
+    """(text, ok): `rewrite` + command_ok, retried once with a stricter prompt. ok=False = both outputs rejected; never paste it.
+    Raises on LLM failure."""
+    for strict in (False, True):
+        out = tidy_edges(rewrite(selection, instruction, ctx, target, strict), selection)
+        if command_ok(selection, instruction, out):
+            return out, True
+        log.warning("command output rejected (strict=%s) instruction=%s", strict,
+                    f"{len(instruction)} chars" if ctx.get("private") else repr(instruction))
+    return "", False
 
 
 _NOUN = r"(?:add|save|put|learn|remember) (?:this|that|it) (?:word|term|name) (?:to|in|into) (?:the|my|murmurs?) dictionary"
@@ -383,6 +455,23 @@ def prepare(raw, ctx, terms=None):
     fixed, hard, hints = phonetic.phonetic_fix(w, list(dict.fromkeys(terms)), COMMON)
     ctx["hints"] = hints[:5]
     return fixed, hard
+
+
+def _bare(w):
+    return re.sub(r"[^\w']", "", w.lower())
+
+
+def live_view(raw, cleaned_raw, cleaned_text):
+    """(text, interim) for the card while recording: the live-cleaned text for the words it covered plus the newer raw
+    words (the last one dimmed as still changing), so self-corrections visibly settle as you talk. The cleaned result is
+    used while its transcript is still a word prefix of `raw` ignoring case and punctuation (Parakeet re-punctuates as
+    context grows); otherwise the raw words."""
+    words = raw.split()
+    done = cleaned_raw.split()
+    if cleaned_text and done and [_bare(w) for w in done] == [_bare(w) for w in words[:len(done)]]:
+        rest = words[len(done):]
+        return " ".join([cleaned_text.strip()] + rest[:-1]), rest[-1] if rest else ""
+    return " ".join(words[:-1]), words[-1] if words else ""
 
 
 def password_text(raw):

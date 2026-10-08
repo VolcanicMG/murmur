@@ -311,6 +311,35 @@ class T(unittest.TestCase):
         self.assertEqual(q("the thing was quote super quote cool"), 'the thing was "super" cool')  # bare second quote closes
         self.assertEqual(brain.spoken_forms("say quote forty two end quote now"), 'say "forty two" now')  # runs inside spoken_forms
 
+    def test_live_view(self):
+        lv = brain.live_view
+        self.assertEqual(lv("um hello there. how are you", "um hello there", "Hello there."), ("Hello there. how are", "you"))
+        self.assertEqual(lv("Hello there, how are you", "hello there.", "Hello there."), ("Hello there. how are", "you"))  # re-punctuated
+        self.assertEqual(lv("hello there", "hello there", "Hello there."), ("Hello there.", ""))  # fully covered
+        self.assertEqual(lv("goodbye now", "hello there", "Hello there."), ("goodbye", "now"))  # stale: raw
+        self.assertEqual(lv("", "", ""), ("", ""))
+
+    def test_digits_before_units(self):  # replay suite 10-07: "fifteen hundred milliseconds" stayed words
+        d = brain.digits_before_units
+        self.assertEqual(d("Set the timeout to fifteen hundred milliseconds and retry count to three."),
+                         "Set the timeout to 1500 milliseconds and retry count to three.")
+        self.assertEqual(d("wait three seconds"), "wait three seconds")  # small number, prose unit: words stay
+        self.assertEqual(d("it took twenty five minutes"), "it took 25 minutes")
+        self.assertEqual(d("five percent of users"), "5 percent of users")  # technical unit: always digits
+        self.assertEqual(d("one or two seconds"), "one or two seconds")  # not one number: untouched
+        self.assertEqual(brain.apply_scratch("set it to fifteen hundred milliseconds"), "set it to 1500 milliseconds")
+        # review 10-07: compound numbers and number tails
+        self.assertEqual(d("we got one thousand five hundred requests"), "we got 1500 requests")  # was 100500
+        self.assertEqual(d("two thousand three hundred milliseconds"), "2300 milliseconds")
+        self.assertEqual(d("two hundred and fifty milliseconds"), "250 milliseconds")
+        for keep in ("zero point twenty five percent", "eleven point fifteen seconds", "Ten years ago we met", "it is ten times better",
+                     "We met. Twelve years later"):
+            self.assertEqual(d(keep), keep, keep)
+        from murmur import prepass
+        self.assertEqual(prepass._number("one thousand five hundred".split(), 0), ("1500", 4))
+        self.assertEqual(prepass._number("two hundred and five".split(), 0), ("205", 4))
+        self.assertEqual(prepass._number("two hundred and then".split(), 0), ("200", 2))  # 'and' only joins numbers
+
     def test_restore_quotes(self):  # Ethan 10-06: the LLM stripped the marks spoken_quotes put in
         rq, p = brain.restore_quotes, brain.apply_scratch
         self.assertEqual(rq(p("Quote, super, quote, cool."), "super cool."), '"super" cool.')

@@ -132,6 +132,23 @@ class SlowPasswordVerdict(unittest.TestCase):  # R3
         s._paint_raw("hello there")
         self.assertIn("hello", str(ov.transcript.call_args))
 
+    def test_live_clean_shows_on_the_card(self):  # "flow editing while you speak": the settled text replaces the raw words
+        s, ov = make(self.session)
+        s.mode = "dictate"
+        s.cleaned = ("the budget is zero point four three actually zero point four four", "The budget is 0.44", True, True)
+        s._paint_raw("the budget is zero point four three, actually zero point four four per unit")
+        ov.transcript.assert_called_with("The budget is 0.44 per", "unit")
+        s.cleaned = ("a totally different start", "Different.", True, True)  # no longer a prefix: raw words
+        s._paint_raw("hello there friend")
+        ov.transcript.assert_called_with("hello there", "friend")
+        s.cleaned = ("hello there", "Rejected output", True, False)  # the guard rejected it: never shown
+        s._paint_raw("hello there friend")
+        ov.transcript.assert_called_with("hello there", "friend")
+        n = ov.transcript.call_count
+        s.marks["release"] = 1.0  # key up: a late live clean must not overwrite the result card
+        s._paint_raw("hello there friend again")
+        self.assertEqual(ov.transcript.call_count, n)
+
     def test_password_true_masks_forever(self):
         s, ov = make(self.session, verdict="pending")
         s.verdict.publish(True)

@@ -40,16 +40,33 @@ def similarity(a, b):
 
 
 FUNCTION_WORDS = {"the", "a", "an", "to", "of", "in", "on", "at", "for", "and", "or"}
+_LETTER_NAMES = dict(zip("abcdefghijklmnopqrstuvwxyz", "ay bee see dee ee ef jee aych eye jay kay el em en oh pee kyu ar es tee you vee "
+                                                       "doubleyou ex why zee".split()))  # how an acronym is spoken: "LM" -> "el em"
+
+
+def spoken_forms(term):
+    """Letter spellings to compare a dictionary term against: the term itself, plus each 2-4 letter ALL-CAPS token said
+    letter by letter ("LM Studio" -> "elemstudio"; Parakeet hears "Elm Studios")."""
+    spoken = _letters(" ".join(_say(t) for t in term.split()))
+    return [_letters(term)] + ([spoken] if spoken != _letters(term) else [])
+
+
+def _say(token):
+    """'LM' -> 'elem'; any other token unchanged."""
+    return "".join(_LETTER_NAMES[c] for c in token.lower()) if re.fullmatch(r"[A-Z]{2,4}", token) else token
 
 
 def _grade(words, tkey, tl):
     """"hard" | "hint" | None for a window of raw words vs a dictionary term. Only a MULTI-word window can be hard (a split
-    name: "pod stead"): identical sound keys, letter similarity >= 0.8, no function word inside, and every word pulls its
-    weight (dropping one must make the match worse, i.e. the window swallows nothing extra). One word is only ever a hint."""
+    name: "pod stead", or an acronym said as letters: "elm studio" vs "el em studio", see spoken_forms): identical sound keys,
+    letter similarity >= 0.8, no function word inside, and every word pulls its weight (dropping one must make the match
+    worse, i.e. the window swallows nothing extra). One word is only ever a hint. (Keys one edit apart were tried as hard
+    matches and rejected: "film studios" and "Helm Studio" became "LM Studio".)"""
     wl = _letters("".join(words))
     wkey, d, sim = sound_key(wl), None, similarity(wl, tl)
     d = edit_distance(wkey, tkey)
-    if len(words) > 1 and d == 0 and sim >= 0.8 and not any(w.lower() in FUNCTION_WORDS for w in words) and all(
+    close = d == 0 and sim >= 0.8
+    if len(words) > 1 and close and not any(w.lower() in FUNCTION_WORDS for w in words) and all(
             similarity(_letters("".join(words[:k] + words[k + 1:])), tl) < sim for k in range(len(words))):
         return "hard"
     return "hint" if d <= (1 if len(tkey) < 5 else 2) and sim >= 0.55 else None
@@ -85,24 +102,52 @@ def _windows(tokens, common):
 
 
 def _prepared_terms(terms, common):
-    """[(term, letters, sound key)] for the terms worth matching (>= 4 letters, not a common word)."""
+    """[(term, letters, sound key)] for the terms worth matching (>= 4 letters, not a common word); a term with an acronym
+    gets one row per spoken form."""
     out = []
     for term in terms:
-        tl = _letters(term)
-        if len(tl) >= 4 and tl not in common:
-            out.append((term, tl, sound_key(term)))
+        if len(_letters(term)) >= 4 and _letters(term) not in common:
+            out += [(term, tl, sound_key(tl)) for tl in spoken_forms(term)]
     return out
+
+
+def _best(words, term, tl, tkey):
+    """(grade, similarity) of the best way `words` match one spoken form of `term`, or None. A match that needs the plural -s
+    dropped is hard only via an acronym's spoken form ("Elm Studios" -> "LM Studio"); otherwise a hint ("pod steads" is a real
+    plural). A window whose singular already IS the term ("LM Studios") never matches."""
+    forms = _singular(words, tl)
+    if any(" ".join(ws).lower() == term.lower() for ws in forms):
+        return None  # the term is already there, just plural
+    out = []
+    for n, ws in enumerate(forms):
+        wl = _letters("".join(ws))
+        if abs(len(sound_key(wl)) - len(tkey)) > 2:
+            continue  # too different to bother
+        g = _grade(ws, tkey, tl)
+        if g == "hard" and n and tl == _letters(term):
+            g = "hint"
+        if g:
+            out.append((g, similarity(wl, tl)))
+    return max(out, key=lambda g: (g[0] == "hard", g[1])) if out else None
+
+
+def _singular(words, tl):
+    """The window as heard, plus the same window with a plural -s dropped from the last word when the term has none
+    ("Elm Studios" vs "LM Studio")."""
+    last = words[-1]
+    if len(last) > 3 and last[-1] in "sS" and not tl.endswith("s"):
+        return [words, words[:-1] + [last[:-1]]]
+    return [words]
 
 
 def _match(i, j, words, prepared):
     """Candidates (start, end, term, grade, sim) for one window against every prepared term."""
-    wl = _letters("".join(words))
-    heard, wkey = " ".join(words), sound_key(wl)
+    heard = " ".join(words)
     for term, tl, tkey in prepared:
-        if heard.lower() == term.lower() or term.lower() in (w.lower() for w in words) or abs(len(wkey) - len(tkey)) > 2:
-            continue  # the term is already there (case-insensitively), or too different to bother
-        if grade := _grade(words, tkey, tl):
-            yield i, j, term, grade, similarity(wl, tl)
+        if heard.lower() == term.lower() or term.lower() in (w.lower() for w in words):
+            continue  # the term is already there (case-insensitively)
+        if best := _best(words, term, tl, tkey):
+            yield i, j, term, *best
 
 
 def _candidates(tokens, terms, common):
