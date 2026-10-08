@@ -24,6 +24,8 @@ def learn_dictionary(final, edited):
         w = m.group()
         if w in seen or w in out or w.lower() in COMMON or re.fullmatch(r"[\d.,:/-]+", w) or not _looks_like_term(w):
             continue
+        if w[:1].isupper() and w[1:].islower() and re.search(r"(?:^|[.!?]\s+)$", edited[:m.start()]) and not any(phonetic.phonetic_fix(final, [w])[1:]):
+            continue  # sentence-start capital ("Ask", "Eggs"): a name only if it fixes a sound-alike ("pod stead" -> Podstead)
         out.append(w)
     return out
 

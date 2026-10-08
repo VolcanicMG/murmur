@@ -50,8 +50,17 @@ class Checked(unittest.TestCase):
         self.assertEqual((out, ok), ("", False))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class NoTarget(unittest.TestCase):  # Ethan 10-08: "Make this into a list" with nothing read -> "Please provide the text..."
+    def test_edit_of_this_needs_a_target(self):
+        for ins in ("Make this into a list.", "turn it into bullets", "translate that to Spanish", "please fix the text"):
+            self.assertTrue(brain.needs_target(ins), ins)
+        for ins in ("make a list of groceries", "write a haiku about cats", "draft a reply saying I'm late"):
+            self.assertFalse(brain.needs_target(ins), ins)
+
+    def test_asking_for_input_is_never_pasted(self):
+        self.assertFalse(brain.command_ok("", "Make this into a list.", "Please provide the text you would like me to make into a list."))
+        self.assertFalse(brain.command_ok("a b c d e", "make a list", "Could you provide the text to format?"))
+        self.assertTrue(brain.command_ok("", "write a reply", "Sounds good, see you at five."))
 
 
 class ReviewCases(unittest.TestCase):  # review 10-07: legitimate edits the first guard rejected, and what must still fail
@@ -81,3 +90,7 @@ class ReviewCases(unittest.TestCase):  # review 10-07: legitimate edits the firs
         self.assertFalse(brain.command_ok(sel, "Remove a bunch of roots.", " Remove a bunch of roots."))
         self.assertFalse(brain.command_ok(sel, "make it formal", "Here is the revised version: So we have items one to three."))
         self.assertFalse(brain.command_ok(sel, "delete the last item", "Grapes."))  # a targeted edit that gutted the list
+
+
+if __name__ == "__main__":
+    unittest.main()

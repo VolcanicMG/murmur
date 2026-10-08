@@ -93,6 +93,20 @@ class Rebind(unittest.TestCase):
         self.assertEqual(len(self.kb.live), 7)
 
 
+class FixPanel(unittest.TestCase):
+    def test_saving_a_fix_learns_terms_and_records_the_correction(self):
+        app, _ = load_app()
+        panel = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"murmur.settings": panel}), \
+                mock.patch.object(app.store, "add_terms", return_value=["Podsteads"]) as add, \
+                mock.patch.object(app.store, "correct_last") as corr:
+            app.fix_last("root", {"ts": "t1", "final": "two pod sets", "raw": "two pod sets"})
+            root, row, on_save = panel.fix_panel.call_args[0]
+            on_save("two Podsteads")
+        add.assert_called_once_with(["Podsteads"])
+        corr.assert_called_once_with("t1", "two pod sets", "two Podsteads")
+
+
 class Hooks(unittest.TestCase):
     def setUp(self):
         self.app, self.kb = load_app()

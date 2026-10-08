@@ -241,5 +241,15 @@ class SelectBeforeCaret(unittest.TestCase):
         self.assertEqual(self.c._utf16_len("\U0001F600a"), 3)
 
 
+
+class Placeholder(unittest.TestCase):
+    def test_vscode_stand_in_selection_is_unknown(self):  # probe 10-08: sel_known=True, 0 chars, while text was selected
+        from murmur import context
+        name = "The editor is not accessible at this time. To enable screen reader optimized mode, use Shift+Alt+F1"
+        self.assertTrue(context.placeholder(name, ("", "\n", "", True)))
+        self.assertTrue(context.placeholder("Message", ("", "", "", True)))  # nothing readable: can't vouch for "no selection"
+        self.assertFalse(context.placeholder("Text Editor", ("Hello there", "", "", True)))
+
+
 if __name__ == "__main__":
     unittest.main()

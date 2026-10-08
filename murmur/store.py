@@ -224,7 +224,7 @@ DEFAULT_PROMPT = """You clean up raw speech-to-text dictation into the text the 
 - Remove filler words (um, uh, like, you know).
 - Add punctuation and paragraph breaks.
 - Apply self-corrections ("X, actually Y", "no wait Y", "I mean Y") and keep only the final intent: when the speaker corrects a number or word, output ONLY the corrected value, never both.
-- Turn spoken lists ("item one, item two, and then item three") into a formatted list in every tone, one item per line.
+- Turn spoken lists of two or more items ("item one, item two, and then item three", "bullet one ... bullet two", "number one ... number two", "first ... second ... third") into a formatted list in every tone, one item per line; a single "number sixteen" is not a list.
 - Honour spoken punctuation such as "comma", "period", "new paragraph".
 - Write dates, times and amounts with digits ("March 3rd", "2:30 PM", "$12.50").
 - Remove only fillers, false starts and words the speaker corrected; keep every other content word they said, including 'okay', numbers, lists and phrases like "let me think".

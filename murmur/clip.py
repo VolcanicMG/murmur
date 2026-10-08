@@ -63,6 +63,22 @@ def _shrink(cb, items):
     return items if within_cap(items) else None
 
 
+_EMPTY_SEL = '"isFromEmptySelection":'
+
+
+def empty_selection_copy(items, text):
+    """Did ctrl+c copy the whole line because nothing was selected (VS Code's editor.emptySelectionClipboard)? VS Code marks
+    its own copies with isFromEmptySelection in a registered format; without that marker a single line ending in a line
+    break is taken as a line copy. items = snapshot() taken right after the copy."""
+    for f, d in items or []:
+        raw = d if isinstance(d, bytes) else str(d).encode("utf-8") if f >= 0xC000 else b""
+        for enc in ("utf-8", "utf-16-le"):
+            i = raw.find(_EMPTY_SEL.encode(enc))
+            if i >= 0:
+                return raw[i + len(_EMPTY_SEL.encode(enc)):].lstrip(" ".encode(enc)).startswith("true".encode(enc))
+    return text.endswith("\n") and text.count("\n") == 1
+
+
 def snapshot(cb=None):
     """Every saveable format on the clipboard as [(fmt, data)]. [] means the clipboard really was empty; None means "don't
     touch it afterwards": it couldn't be opened or read, nothing on it can be saved, or it is over the size cap even after

@@ -284,6 +284,49 @@ class AcronymsAndPlurals(unittest.TestCase):  # review 10-07
             self.assertEqual(self.fix(s), s, s)
 
 
+class PluralHint(unittest.TestCase):
+    def test_plural_sound_alike_hints_the_plural_term(self):  # Ethan 10-08: "two pod sets" became "two Podstead"
+        text, hard, hints = phonetic.phonetic_fix("We run two pod sets now.", ["Podstead"])
+        self.assertEqual((text, hard), ("We run two pod sets now.", []))
+        self.assertIn(("pod sets", "Podsteads"), hints)
+        self.assertEqual(phonetic.phonetic_fix("in Elm Studios", ["LM Studio"])[0], "in LM Studio")  # acronym -s: still hard
+
+
+class ShortNameHints(unittest.TestCase):
+    def test_short_names_need_a_close_match(self):  # "Pullet" was hinted as Pete and the LLM swapped every list cue
+        hints = lambda raw: [t for _, t in phonetic.phonetic_fix(raw, ["Pete"])[2]]
+        self.assertEqual(hints("Pullet one, fix it"), [])
+        self.assertEqual(hints("ask Peat about it"), ["Pete"])  # a real near miss still hints
+
+
+class Round3(unittest.TestCase):  # Ethan 10-08 test round
+    TERMS = ["Pete", "Podstead", "LM Studio", "Postgres"]
+
+    def test_a_dictionary_word_is_never_remapped(self):  # "Pete and I" pasted as "Podstead and I"
+        self.assertEqual(phonetic.phonetic_fix("Pete and I tested it in LM Studio.", self.TERMS)[1:], ([], []))
+
+    def test_a_mishearing_keeps_its_first_sound(self):
+        self.assertEqual(phonetic.phonetic_fix("we tested it", ["Podstead"])[2], [])
+        self.assertIn(("Posteads", "Podstead"), phonetic.phonetic_fix("Both Posteads are down.", self.TERMS)[2])
+
+    def test_sentence_start_words_are_not_learned_as_names(self):  # the fix panel learned "Ask" and "Eggs"
+        self.assertEqual(brain.learn_dictionary("Speed about the release.", "Ask Pete about the release."), ["Pete"])
+        self.assertEqual(brain.learn_dictionary("We had eggs, bacon", "Eggs, bacon"), [])
+        self.assertEqual(brain.learn_dictionary("pod stead is up", "Podstead is up"), ["Podstead"])  # a sound-alike fix still teaches
+
+    def test_guard_counts_offered_hints_as_applied(self):  # "The pot set is up." -> "Podstead is up." was pasted raw
+        self.assertFalse(brain.plausible("The pot set is up.", "Podstead is up."))
+        judged = brain.with_hints("The pot set is up.", [("pot set", "Podstead")], "Podstead is up.")
+        self.assertTrue(brain.plausible(judged, "Podstead is up."))
+        unused = brain.with_hints("check out the feature login", [("feature", "Podstead")], "Check out the feature login.")
+        self.assertEqual(unused, "check out the feature login")  # a hint the model ignored changes nothing
+
+    def test_term_case_restored_after_cleanup(self):
+        self.assertEqual(brain.restore_term_case("Both podsteads are down, pvp too. murmur", ["Podstead", "PvP", "murmur"]),
+                         "Both Podsteads are down, PvP too. murmur")
+        self.assertEqual(brain.restore_term_case("Murmur is up.", ["murmur"]), "Murmur is up.")  # lowercase terms untouched
+
+
 class ReplayNameMisses(unittest.TestCase):
     def test_missed_names(self):
         from evals import run

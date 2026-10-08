@@ -330,6 +330,13 @@ class T(unittest.TestCase):
         self.assertEqual(lv("hello there", "hello there", "Hello there."), ("Hello there.", ""))  # fully covered
         self.assertEqual(lv("goodbye now", "hello there", "Hello there."), ("goodbye", "now"))  # stale: raw
         self.assertEqual(lv("", "", ""), ("", ""))
+        lst = "* Fix the card flicker.\n* Test the hotkeys."  # Ethan 10-08: raw words trailed the last bullet
+        self.assertEqual(lv("Bullet one, fix the card flicker. Bullet two, test the hotkeys. Bullet three, ship",
+                            "Bullet one, fix the card flicker. Bullet two, test the hotkeys.", lst),
+                         (lst + "\nBullet three,", "ship"))
+        self.assertEqual(lv("a. b c", "a.", "* A."), ("* A.\nb", "c"))  # one finished item, no line break yet
+        self.assertEqual(lv("a. test the hot", "a. test", "* A.\n* Test"), ("* A.\n* Test the", "hot"))  # unfinished item continues
+        self.assertEqual(lv("Hello there. how are you", "hello there.", "Hello there."), ("Hello there. how are", "you"))  # prose: same line
 
     def test_digits_before_units(self):  # replay suite 10-07: "fifteen hundred milliseconds" stayed words
         d = brain.digits_before_units
@@ -351,6 +358,21 @@ class T(unittest.TestCase):
         self.assertEqual(prepass._number("one thousand five hundred".split(), 0), ("1500", 4))
         self.assertEqual(prepass._number("two hundred and five".split(), 0), ("205", 4))
         self.assertEqual(prepass._number("two hundred and then".split(), 0), ("200", 2))  # 'and' only joins numbers
+
+    def test_list_cues(self):  # Ethan 10-08: "bullet" heard as Pullet/Pulit, then swapped for "Pete"
+        lc = brain.apply_scratch
+        self.assertEqual(lc("Pullet one. Fix the card flicker. Pulit two. Fix this. Pulit three."),
+                         "Bullet one. Fix the card flicker. Bullet two. Fix this. Bullet three.")
+        self.assertEqual(lc("pull it 2, ship it"), "bullet 2, ship it")
+        self.assertEqual(lc("Pull it over here."), "Pull it over here.")  # no number after it: untouched
+        self.assertTrue(brain.plausible("Bullet one. Fix the card flicker. Bullet two. Fix this. Bullet three.",
+                                        "- Fix the card flicker\n- Fix this"))  # the cue words are not dropped content
+
+    def test_quote_said_quote_end_quote(self):  # Ethan 10-08 replay: the word "quote" before the real opener
+        q = brain.spoken_quotes
+        self.assertEqual(q("Quote said, quote, Ship it Friday, end quote. So let's plan."), 'Quote said, "Ship it Friday". So let\'s plan.')
+        self.assertEqual(q("the quote was quote fine unquote"), 'the quote was "fine"')
+        self.assertEqual(q("it was quote super quote cool"), 'it was "super" cool')  # bare closer still works
 
     def test_restore_quotes(self):  # Ethan 10-06: the LLM stripped the marks spoken_quotes put in
         rq, p = brain.restore_quotes, brain.apply_scratch

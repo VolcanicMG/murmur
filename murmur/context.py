@@ -99,7 +99,15 @@ def _read(auto, opts):
         meta["thread"] = thread_text(ctl, thread)
     del ctl, sel  # no COM object may outlive the initializer
     n, m = c.get("before_chars", 600), c.get("after_chars", 200)
-    return {**meta, "before": out[0][-n:], "after": out[1][:m], "selected": out[2], "sel_known": out[3]} if out else meta
+    known = out and out[3] and not placeholder(meta["control_name"], out)
+    return {**meta, "before": out[0][-n:], "after": out[1][:m], "selected": out[2], "sel_known": bool(known)} if out else meta
+
+
+def placeholder(name, out):
+    """A TextPattern that can't really see the text: VS Code's editor without screen-reader mode exposes a stand-in ("The
+    editor is not accessible at this time...") whose selection is always empty, or any control holding at most one character.
+    Its empty selection is then unknown, not authoritative."""
+    return "not accessible" in (name or "").lower() or len(out[0]) + len(out[1]) + len(out[2]) <= 1
 
 
 THREAD_TYPES = {"TextControl", "ListItemControl", "DocumentControl"}

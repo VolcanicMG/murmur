@@ -70,13 +70,15 @@ class Painter:
         return [(text + gap, "main")] + ([(interim, "interim")] if interim else [])
 
     def _wrap(self, runs):
-        """Greedy word wrap of runs to the text width -> lines of [(word + " ", class)]."""
+        """Greedy word wrap of runs to the text width -> lines of [(word + " ", class)]; a "\n" (lists, line breaks) always
+        starts a new line."""
         lines, cur, x, width = [], [], 0.0, self.k(W - 40)
         for t, cls in runs:
-            for word in filter(None, t.split(" ")):
-                if cur and x + self.m("body", word) > width:
+            for word in filter(None, t.replace("\n", " \n ").split(" ")):
+                if word == "\n" or cur and x + self.m("body", word) > width:
                     lines.append(cur); cur, x = [], 0.0
-                cur.append((word + " ", cls)); x += self.m("body", word + " ")
+                if word != "\n":
+                    cur.append((word + " ", cls)); x += self.m("body", word + " ")
         return lines + [cur] if cur else lines
 
     # ---- frame

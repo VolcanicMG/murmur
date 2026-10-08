@@ -182,17 +182,14 @@ def release(mode, cfg=None):
 
 
 def fix_last(root, row):
-    """Editor for one history row; saving teaches the dictionary and records the correction."""
-    import tkinter as tk
+    """Fix window for one history row (settings.fix_panel); saving teaches the dictionary and records the correction."""
+    from . import settings
     final, ts = row["final"], row["ts"]  # ts pins the row even if a newer dictation lands
-    top = tk.Toplevel(root); top.title("murmur: fix"); top.attributes("-topmost", True)
-    box = tk.Text(top, width=70, height=10, wrap="word"); box.insert("1.0", final); box.pack(padx=8, pady=8)
 
-    def save():
-        edited = box.get("1.0", "end").strip()
+    def save(edited):
         new = store.add_terms(brain.learn_dictionary(final, edited))
-        store.correct_last(ts, final, edited); log.info("learned: %s", new); top.destroy()
-    tk.Button(top, text="Save", command=save).pack(pady=(0, 8))
+        store.correct_last(ts, final, edited); log.info("fix saved: %d new dictionary term(s)", len(new))
+    settings.fix_panel(root, row, save)
 
 
 def fix_newest(root):

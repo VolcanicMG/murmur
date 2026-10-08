@@ -69,7 +69,9 @@ def _grade(words, tkey, tl):
     if len(words) > 1 and close and not any(w.lower() in FUNCTION_WORDS for w in words) and all(
             similarity(_letters("".join(words[:k] + words[k + 1:])), tl) < sim for k in range(len(words))):
         return "hard"
-    return "hint" if d <= (1 if len(tkey) < 5 else 2) and sim >= 0.55 else None
+    if len(words) > 1 and any(w.lower() in FUNCTION_WORDS for w in words) or wkey[:1] != tkey[:1]:
+        return None  # "Pete and" is not a sound-alike; a mishearing keeps its first sound ("tested" is not Podstead)
+    return "hint" if d <= (1 if len(tkey) < 5 else 2) and sim >= (0.7 if len(tl) <= 4 else 0.55) else None  # short names: closer
 
 
 def _tokens(text):
@@ -112,9 +114,10 @@ def _prepared_terms(terms, common):
 
 
 def _best(words, term, tl, tkey):
-    """(grade, similarity) of the best way `words` match one spoken form of `term`, or None. A match that needs the plural -s
-    dropped is hard only via an acronym's spoken form ("Elm Studios" -> "LM Studio"); otherwise a hint ("pod steads" is a real
-    plural). A window whose singular already IS the term ("LM Studios") never matches."""
+    """(grade, similarity, plural) of the best way `words` match one spoken form of `term`, or None. A match that needs the
+    plural -s dropped is hard only via an acronym's spoken form ("Elm Studios" -> "LM Studio": Parakeet's -s); otherwise it is a
+    hint for the PLURAL term (plural=True: "pod sets" -> "Podsteads", a real plural). A window whose singular already IS the
+    term ("LM Studios") never matches."""
     forms = _singular(words, tl)
     if any(" ".join(ws).lower() == term.lower() for ws in forms):
         return None  # the term is already there, just plural
@@ -124,10 +127,11 @@ def _best(words, term, tl, tkey):
         if abs(len(sound_key(wl)) - len(tkey)) > 2:
             continue  # too different to bother
         g = _grade(ws, tkey, tl)
-        if g == "hard" and n and tl == _letters(term):
+        plural = bool(n) and tl == _letters(term) and g is not None and sound_key(wl) == tkey  # singular sounds like the term
+        if plural:
             g = "hint"
         if g:
-            out.append((g, similarity(wl, tl)))
+            out.append((g, similarity(wl, tl), plural))
     return max(out, key=lambda g: (g[0] == "hard", g[1])) if out else None
 
 
@@ -140,20 +144,22 @@ def _singular(words, tl):
     return [words]
 
 
-def _match(i, j, words, prepared):
-    """Candidates (start, end, term, grade, sim) for one window against every prepared term."""
-    heard = " ".join(words)
+def _match(i, j, words, prepared, single=frozenset()):
+    """Candidates (start, end, term, grade, sim) for one window against every prepared term. A window that already contains
+    the term, or another one-word dictionary term exactly ("Pete and" vs Podstead), never matches."""
+    heard, low = " ".join(words), [w.lower() for w in words]
     for term, tl, tkey in prepared:
-        if heard.lower() == term.lower() or term.lower() in (w.lower() for w in words):
-            continue  # the term is already there (case-insensitively)
+        if re.search(rf"\b{re.escape(term.lower())}\b", heard.lower()) or any(w in single and w != term.lower() for w in low):
+            continue
         if best := _best(words, term, tl, tkey):
-            yield i, j, term, *best
+            g, sim, plural = best
+            yield i, j, term + "s" if plural else term, g, sim  # ponytail: naive plural (+s), fine for names/jargon
 
 
 def _candidates(tokens, terms, common):
     """Every (start_idx, end_idx, term, grade, sim) over windows of 1-3 adjacent words that don't cross sentence punctuation."""
-    prepared = _prepared_terms(terms, common)
-    return [c for i, j, words in _windows(tokens, common) for c in _match(i, j, words, prepared)]
+    prepared, single = _prepared_terms(terms, common), {t.lower() for t in terms if " " not in t}
+    return [c for i, j, words in _windows(tokens, common) for c in _match(i, j, words, prepared, single)]
 
 
 def phonetic_fix(raw, terms, common=frozenset()):
@@ -180,4 +186,4 @@ def phonetic_fix(raw, terms, common=frozenset()):
     for a, b, rep in sorted(edits, reverse=True):
         text = text[:a] + rep + text[b:]
     done = {t for _, t in hard}
-    return text, hard, [(h, t) for t, h in best_hint.items() if t not in done]
+    return text, hard, [(h, t) for t, h in best_hint.items() if t not in done and t + "s" not in best_hint]  # plural hint wins

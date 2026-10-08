@@ -196,5 +196,21 @@ class RealClipboard(unittest.TestCase):
             clip.restore(original)  # leave the user's clipboard as it was
 
 
+
+class EmptySelectionCopy(unittest.TestCase):  # Ethan 10-08: VS Code's UIA stand-in always reports an empty selection
+    def test_vscode_marker_decides(self):
+        f = clip.empty_selection_copy
+        mark = lambda v: [(13, "x"), (0xC123, ('{"version":1,"isFromEmptySelection":%s}' % v).encode("utf-16-le"))]
+        self.assertTrue(f(mark("true"), "whole line\n"))
+        self.assertFalse(f(mark("false"), "a selected line\n"))  # a real triple-click selection of a line
+        self.assertTrue(f([(0xC001, b'{"isFromEmptySelection": true}')], "x"))
+
+    def test_without_a_marker_a_single_line_with_a_break_is_a_line_copy(self):
+        f = clip.empty_selection_copy
+        self.assertTrue(f([(13, "x")], "some line\n"))
+        self.assertFalse(f([(13, "x")], "Eggs, bacon, cheese, sandwiches"))
+        self.assertFalse(f([], "two\nlines\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -84,13 +84,16 @@ def undo():
     keyboard.send("ctrl+z")
 
 
-def copy_selection():
-    """Selected text via ctrl+c, or None if nothing was copied."""
+def copy_selection(skip_line_copy=False):
+    """Selected text via ctrl+c, or None if nothing was copied. skip_line_copy: None too when the editor copied the whole line
+    because nothing was selected (clip.empty_selection_copy), so a command can't rewrite a line nobody selected."""
     snap = clip_snapshot()
     pyperclip.copy("")
     keyboard.send("ctrl+c")
     time.sleep(0.3)
     got = pyperclip.paste()
+    if got and skip_line_copy and clip.empty_selection_copy(clip_snapshot(), got):
+        got = ""
     clip_restore(snap)
     return got or None
 

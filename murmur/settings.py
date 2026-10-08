@@ -824,6 +824,60 @@ def _advanced_card(B):
     return SimpleNamespace(load=load, bind_buttons=bind_buttons, dirty=lambda: bool(edit.edit_modified()))
 
 
+FIX_HELP = ("Edit the text below into what you meant, then Save. murmur learns from your change: new names and terms go into "
+            "your dictionary, and the correction becomes an example for future dictations. Saving doesn't change text you already "
+            "pasted; fix that in the app itself.")
+_fix_open = [None]  # the one fix window (the fix hotkey has fired twice within 1 ms)
+
+
+def fix_panel(root, row, on_save):
+    """"Fix a dictation" window for one history row: what saving does, what murmur heard, an editor for what was meant and a
+    live preview of the words it will learn; on_save(edited) does the learning (not called when nothing changed). One at a
+    time: a second open raises the existing window."""
+    if _fix_open[0] is not None and _fix_open[0].winfo_exists():
+        _fix_open[0].lift(); _fix_open[0].focus_force()
+        return _fix_open[0]
+    from .learn import learn_dictionary
+    ui, final = make_ui(), row["final"]
+    k = ui.k
+    top = _fix_open[0] = tk.Toplevel(root)
+    top.title("murmur: fix"); top.configure(bg=FILL); top.attributes("-topmost", True)
+    body = tk.Frame(top, bg=FILL); body.pack(fill="both", expand=True, padx=k(22), pady=k(18))
+    _label(body, ui, "Fix a dictation", "title", TEXT).pack(anchor="w")
+    help_ = _label(body, ui, FIX_HELP, "body"); help_.config(wraplength=k(540), justify="left"); help_.pack(anchor="w", pady=(k(6), 0))
+    if row.get("raw"):
+        _label(body, ui, "murmur heard", "label").pack(anchor="w", pady=(k(14), k(2)))
+        heard = _label(body, ui, row["raw"], "small"); heard.config(wraplength=k(540), justify="left"); heard.pack(anchor="w")
+    _label(body, ui, "What you meant", "label").pack(anchor="w", pady=(k(14), k(4)))
+    box = _text(body, ui, 6, mono=False); box.pack(fill="x"); box.insert("1.0", final)
+    learn = _label(body, ui, "", "small", NAME); learn.config(wraplength=k(540), justify="left"); learn.pack(anchor="w", pady=(k(8), 0))
+
+    def preview(_e=None):
+        terms = learn_dictionary(final, box.get("1.0", "end").strip())
+        learn.config(text="Will add to your dictionary: " + ", ".join(terms) if terms else
+                     "No new words to learn yet: correct a name or term above (Save still records the correction).")
+
+    def close():
+        _fix_open[0] = None
+        top.destroy()
+
+    def save():
+        edited = box.get("1.0", "end").strip()
+        if edited and edited != final.strip():
+            on_save(edited)
+        close()
+    bar = tk.Frame(body, bg=FILL); bar.pack(fill="x", pady=(k(16), 0))
+    pill(bar, ui, "Save", save, "primary").pack(side="left")
+    pill(bar, ui, "Cancel", close).pack(side="left", padx=(k(8), 0))
+    _label(bar, ui, "Ctrl+Enter saves \u00b7 Esc cancels").pack(side="right")
+    box.bind("<KeyRelease>", preview)
+    top.bind("<Control-Return>", lambda e: (save(), "break")[1]); top.bind("<Escape>", lambda e: close())
+    top.protocol("WM_DELETE_WINDOW", close)
+    win.style_window(top)
+    preview(); box.focus_set(); box.mark_set("insert", "end")
+    return top
+
+
 def make_ui():
     """Scale helper `k` and the shared font set (needs a Tk root to exist); also used by the setup window."""
     s = win.dpi_scale()

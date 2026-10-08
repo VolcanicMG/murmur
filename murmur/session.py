@@ -430,7 +430,7 @@ class Session:
             return False, ""
         known, sel = self.ctx.get("sel_known", False), self.ctx.get("selected", "")
         if not known and not sel and self.app not in store.no_copy(self.cfg):
-            sel = win.copy_selection() or ""
+            sel = win.copy_selection(skip_line_copy=True) or ""
         return known, sel
 
     def _select_last(self, core, before):
@@ -496,6 +496,11 @@ class Session:
         self.target, text = brain.resolve_target((known, selected), before, self.last_paste(), (self.app, time.time()))
         if self.target == "last" and not self._select_last(text, before):
             self.target, text = "new", ""
+        log.info("command target: %s (%d chars; uia selection %s)", self.target, len(text), "known" if known else "unknown")
+        if self.target == "new" and brain.needs_target(instruction):  # "make this a list" with nothing selected
+            self._cue("cancel")
+            self._post(lambda: self.ov.state("nothing", "Select the text first, then say it again.", label="Not selected"))
+            return None
         self.selection = text
         self._label({"selection": f"selection: {len(text)} chars", "last": "editing last dictation", "new": "new text"}[self.target])
         try:

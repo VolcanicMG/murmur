@@ -15,7 +15,8 @@ _ORDINALS = {w: str(i + 1) for i, w in enumerate("first second third fourth fift
 _ORDINALS.update({w: str(10 * (i + 2)) for i, w in enumerate(
     "twentieth thirtieth fortieth fiftieth sixtieth seventieth eightieth ninetieth".split())})
 _SPOKEN_PUNCT = re.compile(r"\b(?:question mark|exclamation (?:mark|point)|full stop|new line|new paragraph)\b|"
-                           r"\b(?:comma|period|colon|semicolon|dash|dot)\b")
+                           r"\b(?:comma|period|colon|semicolon|dash|dot)\b|"
+                           r"\bbullet(?: point)?(?:\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+))?\b")  # list cues become list markers
 _SAME = {"okay": "ok"}
 
 
@@ -326,6 +327,9 @@ def spoken_addresses(text):
 
 
 _QUOTE = re.compile(r"(?i)\b(?:open |begin |start )?quote\b[,:]?\s+(?P<q>.+?)[,.]?\s+(?:(?:close|end) quotes?|unquote|quotes? (?:close|closed|end)|quote)\b[,.]?")
+# an explicit closer pairs with the NEAREST "quote" before it: "the quote said, quote, ship it, end quote"
+_QUOTE_END = re.compile(r"(?i)\b(?:open |begin |start )?quote\b[,:]?\s+(?P<q>(?:(?!\bquote\b).)+?)[,.]?\s+"
+                        r"(?:(?:close|end) quotes?|unquote|quotes? (?:close|closed|end))\b[,.]?")
 
 
 def spoken_quotes(text):
@@ -335,7 +339,15 @@ def spoken_quotes(text):
     def sub(m):
         q, tail = m.group("q").strip(), m.group(0)[-1] if m.group(0)[-1] in ".," else ""
         return '"' + q + '"' + ("" if tail == "." and q[-1:] in ".?!" else tail)  # 'Thursday?".' -> 'Thursday?"'
-    return _QUOTE.sub(sub, text)
+    return _QUOTE.sub(sub, _QUOTE_END.sub(sub, text))
+
+
+def restore_term_case(text, terms):
+    """Dictionary spellings the LLM lower-cased ("podsteads" -> "Podsteads", "pvp" -> "PvP"); only terms with a capital letter,
+    so an all-lowercase term ("murmur") can still start a sentence capitalised."""
+    for t in sorted((t for t in terms if t != t.lower()), key=len, reverse=True):
+        text = re.sub(rf"(?i)\b{re.escape(t)}(s?)\b", lambda m: t + m.group(1) if m.group(0) != t + m.group(1) else m.group(0), text)
+    return text
 
 
 def restore_quotes(prepared, final):
@@ -376,10 +388,19 @@ def digits_before_units(text):
     return _UNIT_NUM.sub(sub, text)
 
 
+_BULLET = re.compile(rf"(?i)\b(?:pullet|pulit|bullit|bulit|bullett|bull it|pull it)\b(?=[,.]?\s+(?:{_NUMWORDS}|\d+)\b)")
+
+
+def list_cues(text):
+    """'Pullet one, ... Pulit two' -> 'bullet one, ... bullet two': Parakeet's misses of the spoken list cue, only right before
+    a number (Ethan 10-08: the cue came out as "Pullet"/"Pulit" and the list never formed)."""
+    return _BULLET.sub(lambda m: "Bullet" if m.group(0)[0].isupper() else "bullet", text)
+
+
 def spoken_forms(text):
-    """The deterministic pre-LLM rewrites, in order: number self-corrections, numbers before units, quotes, paragraph/line
-    breaks, e-mail addresses and URLs."""
-    return spoken_addresses(spoken_breaks(spoken_quotes(digits_before_units(correct_numbers(text)))))
+    """The deterministic pre-LLM rewrites, in order: list cues, number self-corrections, numbers before units, quotes,
+    paragraph/line breaks, e-mail addresses and URLs."""
+    return spoken_addresses(spoken_breaks(spoken_quotes(digits_before_units(correct_numbers(list_cues(text))))))
 
 
 

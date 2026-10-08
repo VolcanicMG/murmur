@@ -72,6 +72,8 @@ class T(unittest.TestCase):
         p = Painter(1.0)
         lay = p.layout("transcribing", "ok just pushed the new build to staging " * 3, "lunch")
         self.assertGreater(len(lay.lines), 1)
+        lst = p.layout("transcribing", "* Fix the flicker.\n* Test the hotkeys.\nBullet three,", "ship")
+        self.assertEqual([" ".join(w.strip() for w, _ in l) for l in lst.lines], ["* Fix the flicker.", "* Test the hotkeys.", "Bullet three, ship"])
         self.assertEqual(lay.ch, 52 + lay.th + 4 + 10 + 30 + 14)
         v = View("Listening", "#8E93F7", "Slack", False, 43, 0.5, 1.0)
         img = p.draw(lay, v)

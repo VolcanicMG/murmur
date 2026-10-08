@@ -429,13 +429,11 @@ class Card:
         """Greedy word wrap of [(text, colour)] runs -> lines of [(text, colour)]."""
         lines, cur, x = [], [], 0.0
         for text, col in runs:
-            for word in text.split(" "):
-                if not word:
-                    continue
-                w = self._m("body", word + " ")
-                if cur and x + self._m("body", word) > width:
+            for word in filter(None, text.replace("\n", " \n ").split(" ")):  # a "\n" token (list item) starts a new line
+                if word == "\n" or cur and x + self._m("body", word) > width:
                     lines.append(cur); cur, x = [], 0.0
-                cur.append((word + " ", col)); x += w
+                if word != "\n":
+                    cur.append((word + " ", col)); x += self._m("body", word + " ")
         if cur:
             lines.append(cur)
         return lines
