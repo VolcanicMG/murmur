@@ -92,5 +92,17 @@ class ReviewCases(unittest.TestCase):  # review 10-07: legitimate edits the firs
         self.assertFalse(brain.command_ok(sel, "delete the last item", "Grapes."))  # a targeted edit that gutted the list
 
 
+class Paraphrase(unittest.TestCase):  # Ethan 10-08: "make this formal" on a triple-clicked line was refused twice
+    def test_formal_may_replace_every_word(self):
+        sel = "1. The way to do things is the positive way.\n"
+        self.assertTrue(brain.command_ok(sel, "Make this formal.", "The preferred methodology is the affirmative approach."))
+        self.assertTrue(brain.command_check(sel, "make this formal", "Yes.").startswith("length="))  # gutted: still refused
+        self.assertEqual(brain.command_check(sel, "make it casual", "This is a list of methods."), "reply")
+
+    def test_fix_grammar_still_needs_the_words(self):
+        sel = "their going too the store tomorrow to buy apples and pears"
+        self.assertIsNotNone(brain.command_check(sel, "fix the grammar", "I cannot help with that request today, sorry about it."))
+
+
 if __name__ == "__main__":
     unittest.main()

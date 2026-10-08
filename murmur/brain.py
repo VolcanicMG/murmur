@@ -12,7 +12,18 @@ log = logging.getLogger("murmur")
 
 COMMAND_INTRO = ("You edit or write text by voice. You get an instruction and optionally the "
                  "selected text. Apply the instruction to the selection and output the result; "
-                 "with no selection, write the text the instruction asks for.")
+                 "with no selection, write the text the instruction asks for. When the instruction asks for a list, put one "
+                 "item per line, each starting with \"- \" (or \"1.\", \"2.\" for a numbered list); otherwise keep the "
+                 "selection's own lines and formatting.")
+_ITEM = re.compile(r"^(\s*(?:[-*\u2022]|\d+[.)])\s+)([a-z])", re.M)
+
+
+def even_list_case(text):
+    """'* Eggs / * bacon / * cheese' -> every item capitalised, when the list mixes capitalised and lowercase items."""
+    items = re.findall(r"^\s*(?:[-*\u2022]|\d+[.)])\s+(\S)", text, re.M)
+    if len(items) >= 2 and any(c.isupper() for c in items) and any(c.islower() for c in items):
+        return _ITEM.sub(lambda m: m.group(1) + m.group(2).upper(), text)
+    return text
 
 
 def tone_for(app, cfg):
@@ -217,7 +228,7 @@ def clean_checked(raw, ctx, retry=True, shortcut=True):
                         if retry and any(ctx.get(k) for k in ("before", "after", "selected")) else [])
     for n, c in enumerate(attempts, 1):
         out = restore_quotes(raw, restore_breaks(raw, restore_prose_identifiers(raw, _chat(ctx["cfg"], build_system_prompt(c), user), ctx)))
-        out = restore_term_case(out, store.load_dictionary() + list(ctx.get("terms", [])))
+        out = even_list_case(restore_term_case(out, store.load_dictionary() + list(ctx.get("terms", []))))
         stripped = SNIPPET_TOKEN.sub("", out)
         judged = with_hints(raw, ctx.get("hints", []), stripped)
         if plausible(judged, stripped) or (stripped != out and not stripped.strip()):  # only snippet tokens is fine
@@ -332,6 +343,8 @@ _SHRINK = re.compile(r"summar|shorten|shorter|condense|concise|brief|tl;?dr|tran
                      r"english|arabic|hindi)", re.I)  # may drop or change most words: no coverage check
 _REWORD = re.compile(r"rewrite|rephrase|reword|paraphrase|formal|casual|professional|friendly|polite|simplif|improve|polish|tone|expand|"
                      r"fix|correct|grammar|proofread|rhyme|style|sound|more |less ", re.I)  # may change many words
+_PARAPHRASE = re.compile(r"rewrite|rephrase|reword|paraphrase|formal|casual|professional|friendly|polite|simplif|tone|style|"
+                         r"\bmore |\bless ", re.I)  # may legitimately replace every word: judged by length, not overlap
 _REMOVE = re.compile(r"\b(?:remove|delete|drop|cut|take out|get rid of|strip)\b", re.I)
 _EDIT = re.compile(r"\b(?:remove|delete|drop|cut|take out|get rid of|strip|rename|replace|change|swap|move|sort|insert|add|"
                    r"capitali[sz]e|bold|italic|format|indent|spell)\b", re.I)  # targeted edits keep most of the selection: 50 %
@@ -339,7 +352,9 @@ _REPLY = re.compile(r"(?:here is|here's|here are|certainly|of course|i cannot|i 
                     r"(?:revised|edited|updated|rewritten|new) (?:version|text)|the (?:text|selection|instruction|selected))\b"
                     r"|.{0,60}\b(?:added|saved) to (?:the|your|my) dictionary", re.I)  # a reply opener, rejected outright
 _ASKS = re.compile(r"(?:please |could you |can you |kindly )?(?:provide|share|paste|send|give me|specify|select)\b.{0,40}?"
-                   r"\b(?:text|selection|content|message|list)\b", re.I)  # 'Please provide the text you would like...'
+                   r"\b(?:text|selection|content|message|list)\b.{0,40}?\b(?:you(?:'d| would)? like|you want|for me to|"
+                   r"so (?:that )?i can|to (?:be )?(?:edit|format|rewrite|convert|turn|make|process|work))", re.I)
+                   # 'Please provide the text you would like...'; never 'Please send the message by Friday'
 _THIS_EDIT = re.compile(r"\s*(?:please\s+)?(?:make|turn|convert|change|rewrite|reword|fix|format|translate|shorten|summari[sz]e|"
                         r"clean up|tidy|expand|simplify|sort|number|bullet)\b.{0,30}?\b(?:this|that|these|those|it|them|"
                         r"the (?:text|selection|list|paragraph|sentence|line))\b", re.I)
@@ -356,28 +371,39 @@ _SOFT_REPLY = re.compile(r"(?:this is|these are|sure|okay|ok|i've|i have|i can|i
 
 
 def command_ok(selection, instruction, out):
-    """Is `out` a believable edit of `selection` for `instruction`? Rejects an echo of the instruction, a reply or description
-    instead of an edit ('This is a list of...'), and (unless the instruction shrinks/rewrites) dropping the selection's content.
-    Removal instructions may drop the words they name. No selection = generation: only echo and reply are checked."""
+    """Is `out` a believable edit of `selection` for `instruction`? See command_check."""
+    return command_check(selection, instruction, out) is None
+
+
+def command_check(selection, instruction, out):
+    """None if `out` is a believable edit of `selection` for `instruction`, else why not (logged, no text): "empty", "asks"
+    (the model asking for input), "echo" (the instruction pasted back), "reply" (a reply or description instead of an edit:
+    'This is a list of...') or "coverage=0.xx" (the selection's content dropped; unless the instruction shrinks/rewrites).
+    Removal instructions may drop the words they name. No selection = generation: only empty/asks/echo are checked."""
     o, ins = norm_words(out), norm_words(instruction)
-    if not o or _ASKS.match(out.strip()):
-        return False  # empty, or the model asking for input instead of writing
+    if not o:
+        return "empty"
+    if _ASKS.match(out.strip()):
+        return "asks"
     if o == ins or (len(o) <= len(ins) + 3 and " ".join(ins) in " ".join(o)):
-        return False  # pasted the instruction back
+        return "echo"
     sel = selection or ""
     if not sel.strip():
-        return True  # generation: 'Sure, ...' or "I'm running late" are legitimate new text
+        return None  # generation: 'Sure, ...' or "I'm running late" are legitimate new text
     reply = _REPLY.match(out.strip()) or _SOFT_REPLY.match(out.strip())
     if reply and not (_REPLY.match(sel.strip()) or _SOFT_REPLY.match(sel.strip())) and norm_words(out)[:2] != norm_words(sel)[:2]:
-        return False
+        return "reply"
     if _SHRINK.search(instruction) and not _REMOVE.search(instruction):  # "delete the last item" is not "keep the last item"
-        return True
+        return None
+    if _PARAPHRASE.search(instruction) and not _EDIT.search(instruction):  # "make this formal" may change every word
+        ratio = len(o) / max(1, len(norm_words(sel)))
+        return None if 0.3 <= ratio <= 3 else f"length={ratio:.2f}"
     named = set(ins) if _REMOVE.search(instruction) else set()
     need = set(_words(sel)) - COMMON - named
     if len(need) < 4:
-        return True  # too little to judge
+        return None  # too little to judge
     cov = len(need & set(_words(out))) / len(need)
-    return cov >= (0.5 if _EDIT.search(instruction) and not _REWORD.search(instruction) else 0.25)
+    return None if cov >= (0.5 if _EDIT.search(instruction) and not _REWORD.search(instruction) else 0.25) else f"coverage={cov:.2f}"
 
 
 def norm_words(text):
@@ -398,10 +424,12 @@ def rewrite_checked(selection, instruction, ctx, target="selection"):
     """(text, ok): `rewrite` + command_ok, retried once with a stricter prompt. ok=False = both outputs rejected; never paste it.
     Raises on LLM failure."""
     for strict in (False, True):
-        out = tidy_edges(rewrite(selection, instruction, ctx, target, strict), selection)
-        if command_ok(selection, instruction, out):
+        out = even_list_case(tidy_edges(rewrite(selection, instruction, ctx, target, strict), selection))
+        why = command_check(selection, instruction, out)
+        if why is None:
             return out, True
-        log.warning("command output rejected (strict=%s) instruction=%d chars", strict, len(instruction))
+        log.warning("command output rejected (strict=%s, %s) instruction=%d chars selection=%d chars output=%d chars", strict, why,
+                    len(instruction), len(selection or ""), len(out))
     return "", False
 
 

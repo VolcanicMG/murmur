@@ -368,6 +368,13 @@ class T(unittest.TestCase):
         self.assertTrue(brain.plausible("Bullet one. Fix the card flicker. Bullet two. Fix this. Bullet three.",
                                         "- Fix the card flicker\n- Fix this"))  # the cue words are not dropped content
 
+    def test_even_list_case(self):  # Ethan 10-08: "* Eggs\n* bacon\n* cheese"
+        e = brain.even_list_case
+        self.assertEqual(e("* Eggs\n* bacon\n* cheese"), "* Eggs\n* Bacon\n* Cheese")
+        self.assertEqual(e("1. Eggs\n2. bacon"), "1. Eggs\n2. Bacon")
+        self.assertEqual(e("- eggs\n- bacon"), "- eggs\n- bacon")  # consistently lowercase: left alone
+        self.assertEqual(e("Eggs and bacon"), "Eggs and bacon")
+
     def test_quote_said_quote_end_quote(self):  # Ethan 10-08 replay: the word "quote" before the real opener
         q = brain.spoken_quotes
         self.assertEqual(q("Quote said, quote, Ship it Friday, end quote. So let's plan."), 'Quote said, "Ship it Friday". So let\'s plan.')
