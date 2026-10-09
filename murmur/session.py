@@ -53,6 +53,7 @@ class Session:
         self.verdict, self._pw, self._unknown = context.Verdict(), None, False  # password verdict: published early, frozen at release
         self.rms, self.live_route, self.hint = [], "primary", ""  # per-block RMS aligned with buf (forced segment cuts); route of the live clean; the card hint
         self.full = []  # every frame of the take (buf loses committed segments): the whole-take decode and keep_recordings
+        self.segments, self.redecoded, self.live_use = 1, False, "none"  # for the per-dictation log line
 
     def _cue(self, name):
         """Audio cue (async, honours [ui] sounds); never raises."""
@@ -140,6 +141,7 @@ class Session:
         which costs accuracy there (Ethan's 10-08 takes: "vaults" -> "bolts", "Life 360" -> "Life Through Sixty"), so a take
         of up to REDECODE_S is decoded again in one piece; the segments only ever fed the live card."""
         if self.committed and sum(len(f) for f in self.full) <= REDECODE_S * 16000:
+            self.redecoded = True
             return transcribe(self.full) or self._compose(transcribe(self.buf))
         return self._compose(transcribe(self.buf))
 
@@ -241,7 +243,7 @@ class Session:
         if self.verdict.value is False:
             self.ctx["private"] = store.is_private(self.cfg)
         if text_ok and self.verdict.value is False and "before" in self.ctx:
-            try:  # (a) a hand edit of the last paste is visible now: learn from it
+            try:  # (a) the field as the next dictation starts: ends a live paste watch, catches edits a watch left unknown
                 autolearn.check_and_apply(self.app, self.ctx["before"] + self.ctx.get("selected", "") + self.ctx.get("after", ""), self.cfg)
             except Exception:
                 log.exception("auto-learn check failed")
@@ -283,6 +285,7 @@ class Session:
         cut = n if kind == "pause" or len(rms) < n else capture.cut_point(rms, len(frames[0]) / 16000)
         head = open_text if cut >= n else transcribe(frames[:cut])
         self.committed = self._compose(head)
+        self.segments += 1
         del self.buf[:cut], self.rms[:cut]
         return "" if cut >= n else transcribe(frames[cut:])
 
@@ -387,10 +390,10 @@ class Session:
         if self.paste_now or self.cancelled:
             return self._prep(raw)
         if n <= 1 and self.cleaned[0] == raw and self.cleaned[2] == ("before" in self.ctx):
-            self.route = self.live_route
+            self.route, self.live_use = self.live_route, "reused"
             self.kept_raw = not self.cleaned[3]
             return self.cleaned[1]
-        box, done = [], threading.Event()
+        box, done, self.live_use = [], threading.Event(), "fresh"
         threading.Thread(target=self._clean_into, args=(raw, box, done), daemon=True).start()
         self._wait(done, timeout)
         if not box:  # interrupted by Enter/Esc (raw is what the user asked for) or still running
@@ -553,6 +556,8 @@ class Session:
         log.info("timing %s", " ".join(f"{k}={v:.2f}s" for k, v in lat.items()))
         self.pasted_ok = True
         self.pasted(self.app, "" if self.sensitive else final.strip())  # a password is never kept for "edit last"
+        if self.mode == "dictate":
+            self._log_dictation()
         if self.private:
             self._post(lambda: self._show_outcome(final))
             return
@@ -569,12 +574,23 @@ class Session:
         self._learn_from_redictation(prev, final)
         self._post(lambda: self._show_outcome(final))
 
+    def _log_dictation(self):
+        """One INFO line per dictation: sizes and flags only, never text; a bare marker for private/sensitive sessions."""
+        if self.private:
+            log.info("dictation private")
+            return
+        c = self.ctx
+        sel = "none" if "before" not in c else "known" if c.get("sel_known") else "unknown"
+        log.info("dictation app=%s text=%s before=%d after=%d sel=%s segments=%d redecoded=%s live=%s guard=%s", self.app,
+                 "blocked" if self.app in store.no_copy(self.cfg) else "read", len(c.get("before", "")), len(c.get("after", "")),
+                 sel, self.segments, "yes" if self.redecoded else "no", self.live_use, "raw" if self.kept_raw or self.degraded else "ok")
+
     def _adapt(self, entry, final):
         """Feed the learners after a dictate paste (never reached in private mode or for password fields)."""
         try:
-            autolearn.remember(autolearn.Paste(self.app, self.title, final, entry["ts"], final))
+            e = autolearn.remember(autolearn.Paste(self.app, self.title, final, entry["ts"], final))
             autolearn.count_dictation()
-            autolearn.schedule(self.cfg, self.app, self.live, context.read_text)  # (b) the delayed check
+            autolearn.watch(self.cfg, e, self.live, context.read_text, lambda: win.active_app()[0])  # outcome of this paste
         except Exception:
             log.exception("adapt hooks failed")
 

@@ -121,3 +121,77 @@ def learn_from_edit(pasted, edited):
     if norm(pasted) == norm(edited):
         return [], False
     return learn_dictionary(pasted, edited), edit_is_a_correction(pasted, edited)
+
+
+EDIT_CAP, TEXT_CAP = 8, 200
+
+
+def _tokens(text):
+    """(start, end, normalised word) for each word of `text`; pure punctuation is not a word."""
+    return [(m.start(), m.end(), b) for m in re.finditer(r"\S+", text) if (b := _bare(m.group()))]
+
+
+SOUND_SIM = 0.75  # sound skeletons this alike count as misheard ("bolts" plts / "vaults" flts; "items"/"repos" 0.29)
+
+
+def _kind(src, dst):
+    """'misheard' if the replaced words are close in letters or sound (merged/split words need MERGE_SIM), else 'word_choice'."""
+    if len(src) == len(dst):
+        near = lambda x, y: _close(x, y) or difflib.SequenceMatcher(None, phonetic.sound_key(x), phonetic.sound_key(y)).ratio() >= SOUND_SIM
+        return "misheard" if all(near(x, y) for x, y in zip(src, dst)) else "word_choice"
+    return "misheard" if _close("".join(src), "".join(dst), MERGE_SIM) else "word_choice"
+
+
+def classify_edit(pasted, sent):
+    """What the user did to `pasted` in `sent` (the text they kept or sent), by word alignment of lowercased, punctuation-free
+    words (case/punctuation-only changes are not edits). The pasted part of `sent` runs from the first to the last matched
+    word; words outside it are `added` and never make the paste "edited".
+
+    Returns:
+        {outcome: unchanged|edited|updated|missing, rewrite, added (words), edits: [{kind: misheard|word_choice|restored|
+        removed, from, to}] (<= 8, strings <= 200 chars), span: the user's version of the pasted part, words / matched /
+        span_words: pasted words, how many were found, words in span}. Under half of the
+        pasted words matched = edited with rewrite=True and no edits (too different to attribute)."""
+    a, b = _tokens(pasted), _tokens(sent)
+    na, nb = [t[2] for t in a], [t[2] for t in b]
+    ops = difflib.SequenceMatcher(None, na, nb, autojunk=False).get_opcodes()
+    eq = [o for o in ops if o[0] == "equal"]
+    res = {"outcome": "missing", "rewrite": False, "added": 0, "edits": [], "span": "", "words": len(a), "matched": 0, "span_words": 0}
+    if not eq:
+        return res
+    lo, hi = eq[0][3], eq[-1][4]
+    said = lambda i, j: " ".join(pasted[s:e] for s, e, _ in a[i:j])[:TEXT_CAP]
+    kept = lambda i, j: " ".join(sent[s:e] for s, e, _ in b[i:j])[:TEXT_CAP]
+    for k, (tag, i1, i2, j1, j2) in enumerate(ops):
+        if tag == "equal":
+            continue
+        if k in (0, len(ops) - 1):  # sent words before/after the paste are added; a pasted edge word they replace is an edit
+            n = min(i2 - i1, j2 - j1)
+            res["added"] += (j2 - j1) - n
+            if k == 0:
+                lo = j1 = j2 - n
+            else:
+                hi = j2 = j1 + n
+            if i1 == i2:
+                continue
+            tag = "delete" if j1 == j2 else "replace"
+        kind = {"insert": "restored", "delete": "removed"}.get(tag) or _kind(na[i1:i2], nb[j1:j2])
+        res["edits"].append({"kind": kind, "from": said(i1, i2), "to": kept(j1, j2)})
+    res.update(span=sent[b[lo][0]:b[hi - 1][1]], matched=sum(o[2] - o[1] for o in eq), span_words=hi - lo)
+    if res["matched"] * 2 < len(a):
+        res.update(outcome="edited", rewrite=True, edits=[])
+    else:
+        res["outcome"] = "edited" if res["edits"] else "updated" if res["added"] else "unchanged"
+    res["edits"] = res["edits"][:EDIT_CAP]
+    return res
+
+
+def learn_from_result(pasted, res):
+    """Ethan's rule for a classify_edit result: (dictionary terms, `corrected` text or None). Only "misheard" edits teach
+    terms (learn_dictionary over the user's span, kept to the words those edits typed, so its sentence-start and sound-alike
+    guards see real context); the row becomes a few-shot correction only with a misheard edit and no rewrite."""
+    misheard = [e for e in res["edits"] if e["kind"] == "misheard"]
+    if not misheard or res["rewrite"]:
+        return [], None
+    typed = {w for e in misheard for w in re.findall(WORD, e["to"])}
+    return [w for w in learn_dictionary(pasted, res["span"]) if w in typed], res["span"]

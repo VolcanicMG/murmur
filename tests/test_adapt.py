@@ -1,4 +1,6 @@
-import sys, tempfile, time, unittest
+import json, sys, tempfile, threading, time, unittest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -195,23 +197,252 @@ class DetectEdit(unittest.TestCase):
         self.assertEqual(len(autolearn._pending), 1)  # still pending: nothing consumed it
         autolearn._pending.clear()
 
-    def test_delayed_check_skips_when_busy_or_app_changed(self):
-        calls = []
-        with mock.patch.object(autolearn, "check_and_apply", side_effect=lambda *a: calls.append(a)):
-            autolearn.schedule({}, "code.exe", lambda: True, lambda c: ("code.exe", "x"), delay=0).join()
-            autolearn.schedule({}, "code.exe", lambda: False, lambda c: ("slack.exe", "x"), delay=0).join()
-            self.assertEqual(calls, [])
-            autolearn.schedule({}, "code.exe", lambda: False, lambda c: ("code.exe", "text"), delay=0).join()
-        self.assertEqual(len(calls), 1)
-
-
-    def test_delayed_check_never_reads_a_terminal(self):  # R10
+    def test_watch_never_reads_a_terminal_or_private(self):  # R10
         reads = []
-        cfg = {"apps": {"no_copy": ["windowsterminal.exe"]}}
-        autolearn.schedule(cfg, "windowsterminal.exe", lambda: False, lambda c: reads.append(c) or ("windowsterminal.exe", "x"), delay=0).join()
+        rd = lambda c, a=None: reads.append(c) or ("windowsterminal.exe", "x")
+        e = {"app": "windowsterminal.exe", "text": "x", "ts": "1", "final": "x", "t": 0}
+        self.assertIsNone(autolearn.watch({"apps": {"no_copy": ["windowsterminal.exe"]}}, e, lambda: False, rd, lambda: "", kb=FakeKb()))
+        self.assertIsNone(autolearn.watch({"privacy": {"private": True}}, {**e, "app": "code.exe"}, lambda: False, rd, lambda: "", kb=FakeKb()))
+        self.assertIsNone(autolearn.watch({"learning": {"auto_edits": False}}, {**e, "app": "code.exe"}, lambda: False, rd, lambda: "", kb=FakeKb()))
         self.assertEqual(reads, [])
-        autolearn.schedule(cfg, "code.exe", lambda: False, lambda c: reads.append(c) or ("code.exe", ""), delay=0).join()
-        self.assertEqual(len(reads), 1)
+
+
+class FakeKb:
+    """keyboard stand-in: records the hook callback and every unhook."""
+    def __init__(self):
+        self.cb, self.unhooked = None, []
+
+    def hook(self, cb):
+        self.cb = cb
+        return "h"
+
+    def unhook(self, h):
+        self.unhooked.append(h)
+
+    def is_modifier(self, name):
+        return name in ("ctrl", "right ctrl", "shift", "alt")
+
+    def press(self, name):
+        self.cb(SimpleNamespace(event_type="down", name=name))
+
+
+FAST = {"BASELINE_S": 0, "POLL_S": 0.01, "SETTLE_S": 0.05, "WATCH_S": 0.6, "HANDOFF_S": 0.5}
+
+
+class Watch(unittest.TestCase):
+    P = "Store the keys in bolts today."
+
+    def setUp(self):
+        store.HOME = Path(tempfile.mkdtemp()); store.ensure()
+        store.append_history({"ts": "t1", "mode": "dictate", "final": self.P, "raw": self.P})
+        autolearn._pending.clear()
+        self.patches = [mock.patch.object(autolearn, k, v) for k, v in FAST.items()]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        autolearn._pending.clear()
+
+    def run_watch(self, texts, script, busy=lambda: False, app=lambda: "code.exe", cfg=None):
+        kb, reads, self.expects = FakeKb(), list(texts), []
+        e = autolearn.remember(autolearn.Paste("code.exe", "t", self.P, "t1", self.P))
+        rd = lambda c, a=None: self.expects.append(a) or ("code.exe", reads.pop(0) if len(reads) > 1 else reads[0])
+        t = autolearn.watch({} if cfg is None else cfg, e, busy, rd, app, kb=kb)
+        while kb.cb is None:
+            time.sleep(0.005)
+        script(kb)
+        t.join(3)
+        self.assertEqual(kb.unhooked, ["h"])  # the hook always goes, by handle
+        return store.read_history()[-1]
+
+    def test_no_keys_is_unchanged(self):
+        row = self.run_watch(["Hi. " + self.P], lambda kb: None)
+        self.assertEqual((row["outcome"], row["outcome_source"], row["edits"]), ("unchanged", "watch", []))
+        self.assertNotIn("corrected", row)
+
+    def test_a_settled_edit_then_enter_is_recorded_and_learned(self):
+        def script(kb):
+            kb.press("v"); time.sleep(0.2); kb.press("enter")
+        row = self.run_watch(["Hi. " + self.P, "Hi. Store the keys in vaults today."], script)
+        self.assertEqual(row["outcome"], "edited")
+        self.assertEqual(row["edits"], [{"kind": "misheard", "from": "bolts", "to": "vaults"}])
+        self.assertEqual(row["sent"], "Store the keys in vaults today.")
+        self.assertEqual(row["corrected"], "Store the keys in vaults today.")
+        self.assertEqual(autolearn._pending, [])
+
+    def test_keys_without_a_settled_read_stay_unknown(self):
+        def script(kb):
+            kb.press("v"); kb.press("enter")
+        with self.assertLogs("murmur", "INFO") as cm:
+            row = self.run_watch(["Hi. " + self.P, "changed"], script)
+        self.assertNotIn("outcome", row)
+        self.assertIn("unknown", " ".join(cm.output))
+        self.assertEqual(len(autolearn._pending), 1)  # left for hook (a)
+        self.assertNotIn("watching", autolearn._pending[0])
+
+    def test_modifiers_alone_are_not_keys(self):
+        row = self.run_watch(["Hi. " + self.P], lambda kb: kb.press("right ctrl"))
+        self.assertEqual(row["outcome"], "unchanged")
+
+    def test_a_new_session_hands_its_read_to_the_watch(self):
+        state = {"busy": False}
+        def script(kb):
+            time.sleep(0.05); state["busy"] = True; time.sleep(0.05); state["busy"] = False  # the paste's own session ends
+            kb.press("x"); state["busy"] = True  # typed, then dictated again at once
+            autolearn.check_and_apply("code.exe", "Hi. " + self.P + " And more.", {})
+        row = self.run_watch(["Hi. " + self.P], script, busy=lambda: state["busy"])
+        self.assertEqual((row["outcome"], row["added"]), ("updated", 2))
+
+    def test_private_mid_watch_drops_everything(self):  # cfg is live: the tray's private toggle
+        cfg = {}
+        def script(kb):
+            kb.press("v"); time.sleep(0.2); cfg["privacy"] = {"private": True}
+        row = self.run_watch(["Hi. " + self.P, "Hi. Store the keys in vaults today."], script, cfg=cfg)
+        self.assertNotIn("outcome", row)
+        self.assertNotIn("corrected", row)
+        self.assertEqual(autolearn._pending, [])  # not left for hook (a) either
+        self.assertEqual(set(self.expects), {"code.exe"})  # every read names the paste's app
+
+    def test_learning_switched_off_before_the_record_records_nothing(self):
+        cfg = {}
+        def script(kb):
+            kb.press("v"); time.sleep(0.2); cfg["learning"] = {"auto_edits": False}; kb.press("enter")
+        row = self.run_watch(["Hi. " + self.P, "Hi. Store the keys in vaults today."], script, cfg=cfg)
+        self.assertNotIn("outcome", row)
+
+    def test_a_handoff_from_another_field_is_unknown(self):
+        state = {"busy": False}
+        def script(kb):
+            time.sleep(0.05); state["busy"] = True; time.sleep(0.05); state["busy"] = False
+            kb.press("x"); state["busy"] = True
+            autolearn.check_and_apply("code.exe", "totally different field the fix main", {})
+        row = self.run_watch(["Hi. " + self.P], script, busy=lambda: state["busy"])
+        self.assertNotIn("outcome", row)
+
+    def test_poll_returns_reason_and_newest_read(self):
+        e, w = {"app": "code.exe"}, {"stop": threading.Event()}
+        keys = {"last": time.monotonic() + 0.02, "enter": False}  # typed just after the poll began
+        ticks = iter([False] * 20 + [True] * 100)
+        reason, newest, read_t = autolearn._poll({}, e, w, keys, lambda: False, lambda c, a: ("code.exe", "text"),
+                                                 lambda: "slack.exe" if next(ticks) else "code.exe")
+        self.assertEqual((reason, newest), ("app", "text"))
+        self.assertGreaterEqual(read_t, keys["last"])
+        self.assertEqual(autolearn._poll({"privacy": {"private": True}}, e, w, keys, lambda: False, None, None), ("private", None, None))
+
+    def test_app_switch_ends_the_watch(self):
+        row = self.run_watch(["Hi. " + self.P], lambda kb: kb.press("x"), app=lambda: "slack.exe")
+        self.assertNotIn("outcome", row)  # typed, never read again: unknown
+
+
+class WatchLogic(unittest.TestCase):
+    P = "Store the keys in bolts today."
+
+    def test_should_read_after_a_pause_only(self):
+        self.assertFalse(autolearn.should_read(10.0, None, 0.0))  # no keys
+        self.assertFalse(autolearn.should_read(10.0, 9.8, 0.0))  # still typing
+        self.assertTrue(autolearn.should_read(10.0, 9.0, 0.0))
+        self.assertFalse(autolearn.should_read(10.0, 9.0, 9.5))  # already read after that key
+
+    def test_finish_reasons(self):
+        f = autolearn.finish_reason
+        self.assertIsNone(f(1, False, False, False, False))
+        self.assertEqual(f(1, True, False, False, False), "enter")
+        self.assertEqual(f(1, False, True, False, False), "replaced")
+        self.assertEqual(f(1, False, False, True, False), "session")
+        self.assertEqual(f(1, False, False, False, True), "app")
+        self.assertEqual(f(autolearn.WATCH_S, False, False, False, False), "timeout")
+
+    def test_judge_regions(self):
+        base = "Hello there. " + self.P + " Bye."
+        self.assertEqual(autolearn.judge(self.P, base, base)["outcome"], "unchanged")
+        after = autolearn.judge(self.P, base, base + " And one more thing.")
+        self.assertEqual((after["outcome"], after["added"]), ("updated", 4))
+        before = autolearn.judge(self.P, base, "Oh. " + base)
+        self.assertEqual(before["outcome"], "updated")
+        old_text = autolearn.judge(self.P, base, base.replace("Hello", "Howdy"))  # an edit to text that was already there
+        self.assertEqual(old_text["outcome"], "updated")
+        inside = autolearn.judge(self.P, base, base.replace("bolts", "vaults"))
+        self.assertEqual((inside["outcome"], inside["edits"][0]["kind"], inside["added"]), ("edited", "misheard", 0))
+        tail = autolearn.judge(self.P, base, base.replace("today. Bye.", "today, I think."))  # overlap reaching past the paste
+        self.assertEqual((tail["outcome"], tail["added"]), ("updated", 2))  # "Bye." was there before, "I think" typed
+        self.assertIsNone(autolearn.judge(self.P, "something else", "something else!"))  # paste not found: unknown
+        self.assertIsNone(autolearn.judge(self.P, "Hi. " + self.P, "totally different field the fix main"))  # another field
+        self.assertEqual(autolearn.judge(self.P, self.P, "Keep the keys in bolts today.")["outcome"], "edited")  # last 3 words anchor
+        self.assertIsNone(autolearn.judge(self.P, self.P, "Store the vaults now"))  # neither end survives
+        self.assertEqual(autolearn.judge(self.P, base.replace(" ", "\r\n", 1), base.replace(" ", "\r\n", 1))["outcome"], "unchanged")
+
+    def test_watch_result(self):
+        self.assertEqual(autolearn.watch_result(self.P, self.P, None, False, False)["outcome"], "unchanged")
+        self.assertIsNone(autolearn.watch_result(self.P, self.P, None, True, False))
+        self.assertIsNone(autolearn.watch_result(self.P, self.P, self.P + " x", True, False))
+        self.assertEqual(autolearn.watch_result(self.P, self.P, self.P + " x", True, True)["outcome"], "updated")
+
+
+class ClassifyEdit(unittest.TestCase):  # Ethan's real shapes
+    c = staticmethod(brain.classify_edit)
+
+    def test_restored_word(self):
+        r = self.c("Honestly we'd be better at shipping it.", "Honestly no, we'd be better at shipping it.")
+        self.assertEqual((r["outcome"], r["edits"]), ("edited", [{"kind": "restored", "from": "", "to": "no,"}]))
+
+    def test_added_second_sentence_is_updated(self):
+        r = self.c("Put it in the repo.", "Put it in the repo. Then deploy it tomorrow.")
+        self.assertEqual((r["outcome"], r["added"], r["edits"], r["span"]), ("updated", 4, [], "Put it in the repo."))
+        r = self.c("Put it in the repo.", "Quick note: put it in the repo")
+        self.assertEqual((r["outcome"], r["added"]), ("updated", 2))
+
+    def test_misheard_and_word_choice(self):
+        r = self.c("Store the keys in bolts today.", "Store the keys in vaults today.")
+        self.assertEqual(r["edits"], [{"kind": "misheard", "from": "bolts", "to": "vaults"}])
+        r = self.c("Clean up the old items now.", "Clean up the old repos now.")
+        self.assertEqual(r["edits"], [{"kind": "word_choice", "from": "items", "to": "repos"}])
+        r = self.c("I deployed pot stead today.", "I deployed Podstead today.")
+        self.assertEqual(r["edits"][0]["kind"], "misheard")  # merged words: stricter MERGE_SIM
+        r = self.c("bolts are here", "So vaults are here")  # an edge word replaced while text was typed before it
+        self.assertEqual((r["added"], r["edits"][0]["to"], r["span"]), (1, "vaults", "vaults are here"))
+
+    def test_removed(self):
+        r = self.c("Okay, ship it now please.", "ship it now please.")
+        self.assertEqual((r["outcome"], r["edits"]), ("edited", [{"kind": "removed", "from": "Okay,", "to": ""}]))
+
+    def test_case_and_punctuation_are_not_edits(self):
+        self.assertEqual(self.c("okay ship it now please", "Okay. Ship it NOW, please!")["outcome"], "unchanged")
+
+    def test_rewrite_and_missing(self):
+        r = self.c("Okay ship it now please", "Please hold the release until the review is done")
+        self.assertEqual((r["outcome"], r["rewrite"], r["edits"]), ("edited", True, []))
+        self.assertEqual(self.c("Hi there", "nothing alike")["outcome"], "missing")
+
+    def test_caps(self):
+        r = self.c(" ".join(f"w{i}" for i in range(40)), " ".join(f"w{i}" if i % 2 else f"x{i}" * 60 for i in range(40)))
+        self.assertTrue(len(r["edits"]) <= 8 and all(len(e["to"]) <= 200 for e in r["edits"]))
+
+    def test_learning_rule(self):
+        p = "Let's talk to john tomorrow about the deploy."
+        r = self.c(p, "Let's talk to Jon tomorrow about the deploy, ok?")
+        self.assertEqual(brain.learn_from_result(p, r), (["Jon"], "Let's talk to Jon tomorrow about the deploy,"))
+        r = self.c("Deploy it to staging tonight.", "Deploy it to Production tonight.")  # changed mind: data only
+        self.assertEqual(brain.learn_from_result("Deploy it to staging tonight.", r), ([], None))
+        r = self.c("Ask about the release.", "Ask Pete about the release.")  # restored: never a term
+        self.assertEqual(brain.learn_from_result("Ask about the release.", r), ([], None))
+
+
+class OutcomeFields(unittest.TestCase):
+    def test_record_writes_fields_and_only_edited_rows_get_sent(self):
+        store.HOME = Path(tempfile.mkdtemp()); store.ensure()
+        for ts in ("a", "b"):
+            store.append_history({"ts": ts, "mode": "dictate", "final": "Clean up the old items now.", "raw": "x"})
+        e = {"ts": "a", "final": "Clean up the old items now.", "text": "Clean up the old items now."}
+        autolearn.record(e, brain.classify_edit(e["text"], "Clean up the old repos now."), "claude-code")
+        autolearn.record({**e, "ts": "b"}, brain.classify_edit(e["text"], e["text"] + " Thanks."), "watch")
+        a, b = store.read_history()
+        self.assertEqual((a["outcome"], a["outcome_source"], a["sent"], a["rewrite"], a["added"]),
+                         ("edited", "claude-code", "Clean up the old repos now.", False, 0))
+        self.assertNotIn("corrected", a)  # word choice: data only
+        self.assertEqual((b["outcome"], b["added"]), ("updated", 1))
+        self.assertNotIn("sent", b)
 
 
 class StyleRefresh(unittest.TestCase):
@@ -307,7 +538,7 @@ class Round3(unittest.TestCase):  # Ethan 10-08 test round
 
     def test_a_mishearing_keeps_its_first_sound(self):
         self.assertEqual(phonetic.phonetic_fix("we tested it", ["Podstead"])[2], [])
-        self.assertIn(("Posteads", "Podstead"), phonetic.phonetic_fix("Both Posteads are down.", self.TERMS)[2])
+        self.assertIn(("Posteads", "Podsteads"), phonetic.phonetic_fix("Both Posteads are down.", self.TERMS)[2])  # heard plural
 
     def test_sentence_start_words_are_not_learned_as_names(self):  # the fix panel learned "Ask" and "Eggs"
         self.assertEqual(brain.learn_dictionary("Speed about the release.", "Ask Pete about the release."), ["Pete"])
@@ -337,3 +568,89 @@ class ReplayNameMisses(unittest.TestCase):
         from evals import run
         self.assertEqual(run.names("I'm on GitHub. Ask Dr. Nguyen about LM Studio."), ["GitHub", "Nguyen", "LM", "Studio"])
         self.assertEqual(run.missed_names("Ask Dr. Nguyen about LM Studio.", "Ask Dr. Win about Lm Studio."), ["Nguyen", "LM"])
+
+
+class ClaudeCode(unittest.TestCase):  # evals.build --claude-code
+    def setUp(self):
+        from evals import build
+        self.b = build
+
+    def line(self, ts, content, **kw):
+        return json.dumps({"type": "user", "isSidechain": False, "timestamp": ts, "message": {"role": "user", "content": content}, **kw})
+
+    @staticmethod
+    def utc(local, **delta):
+        """A transcript timestamp ("...Z") for a local naive history ts shifted by `delta`."""
+        t = datetime.fromisoformat(local).astimezone(timezone.utc) + timedelta(**delta)
+        return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_human_text_shapes(self):
+        h = self.b.human_text
+        self.assertEqual(h(json.loads(self.line("x", "hi there"))), "hi there")
+        self.assertEqual(h(json.loads(self.line("x", [{"type": "text", "text": "a"}, {"type": "image"}, {"type": "text", "text": "b"}]))), "a\nb")
+        self.assertIsNone(h(json.loads(self.line("x", [{"type": "tool_result", "content": "out"}]))))
+        self.assertIsNone(h(json.loads(self.line("x", "sub", isSidechain=True))))
+        self.assertIsNone(h(json.loads(self.line("x", "caveat", isMeta=True))))
+        self.assertIsNone(h({"type": "assistant", "message": {"content": "hi"}}))
+
+    def test_match_window_and_timezones(self):
+        ts, final = "2026-10-08T14:00:00", "Please check the vaults config."
+        row = {"ts": ts, "final": final}
+        at = lambda **d: (datetime.fromisoformat(self.utc(ts, **d).replace("Z", "+00:00")), "Please check the vaults config. Thanks")
+        self.assertEqual(self.b.match_row(row, [at(seconds=40)])["outcome"], "updated")
+        self.assertEqual(self.b.match_row(row, [at(seconds=-3)])["outcome"], "updated")
+        self.assertIsNone(self.b.match_row(row, [at(seconds=-6)]))
+        self.assertIsNone(self.b.match_row(row, [at(minutes=11)]))
+        other = (at(seconds=10)[0], "Something unrelated entirely")
+        self.assertIsNone(self.b.match_row(row, [other, at(seconds=20)]))  # only the first message is a candidate
+
+    def test_podcast_is_recorded_but_teaches_nothing(self):  # reviewer: "Podstead" -> "podcast" poisoned `corrected`
+        ts, final = "2026-10-08T14:00:00", "Check the Podstead logs."
+        msg = (datetime.fromisoformat(self.utc(ts, seconds=20).replace("Z", "+00:00")), "check the podcast logs for errors please")
+        res = self.b.match_row({"ts": ts, "final": final}, [msg])
+        self.assertEqual(res["outcome"], "edited")
+        self.assertFalse(self.b.strong(res))  # 3 of 4 words matched
+        home = Path(tempfile.mkdtemp()); saved = store.HOME
+        try:
+            store.HOME = home; store.ensure()
+            store.append_history({"ts": ts, "mode": "dictate", "final": final, "raw": "r"})
+            autolearn.record({"ts": ts, "final": final, "text": final}, res, "claude-code", learn=self.b.strong(res))
+            row = store.read_history()[-1]
+            self.assertEqual((row["outcome"], row["sent"]), ("edited", "check the podcast logs"))
+            self.assertNotIn("corrected", row)
+            self.assertNotIn("podcast", store.load_dictionary())
+        finally:
+            store.HOME = saved
+        strong_one = brain.classify_edit("Store the keys in bolts today.", "Store the keys in vaults today. Thanks")
+        self.assertTrue(self.b.strong(strong_one))
+        self.assertFalse(self.b.strong(brain.classify_edit("a b c d e", "a b c d x y z q r s t u e")))  # span too long
+
+    def test_writes_outcomes_for_terminal_rows_only(self):
+        home, cc = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp()) / "proj"
+        cc.mkdir()
+        rows = [{"ts": "2026-10-08T14:00:00", "mode": "dictate", "app": "windowsterminal.exe", "final": "Store the keys in bolts today.", "raw": "r"},
+                {"ts": "2026-10-08T14:05:00", "mode": "dictate", "app": "windowsterminal.exe", "final": "Never sent anywhere at all.", "raw": "r"},
+                {"ts": "2026-10-08T14:06:00", "mode": "dictate", "app": "code.exe", "final": "Store the keys in bolts today.", "raw": "r"}]
+        (home / "history.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        (cc / "s.jsonl").write_text("\n".join([
+            self.line(self.utc(rows[0]["ts"], seconds=30), [{"type": "text", "text": "Store the keys in vaults today. And the other one."}]),
+            self.line(self.utc(rows[2]["ts"], seconds=5), "Store the keys in vaults today."), "{torn"]), encoding="utf-8")
+        saved = store.HOME
+        try:
+            counts = self.b.claude_code(home / "history.jsonl", [cc.parent])
+            a, b, c = store.read_history()
+        finally:
+            store.HOME = saved
+        self.assertEqual(counts, {"edited": 1, "unmatched": 1})
+        self.assertEqual((a["outcome"], a["outcome_source"], a["added"], a["edits"][0]["kind"]), ("edited", "claude-code", 4, "misheard"))
+        self.assertEqual(a["corrected"], a["sent"])
+        self.assertNotIn("outcome", b)
+        self.assertNotIn("outcome", c)  # a readable app: the live watch's job
+
+    def test_history_case_expects_what_was_sent(self):
+        r = {"raw": "r", "final": "Store the keys in bolts today.", "outcome": "edited", "sent": "Store the keys in vaults today.",
+             "edits": [{"kind": "misheard", "from": "bolts", "to": "vaults"}]}
+        case = self.b.history_case(1, r)
+        self.assertEqual(case["expected"], "Store the keys in vaults today.")
+        self.assertIn("EDITED", case["note"]); self.assertIn("misheard", case["note"])
+        self.assertEqual(self.b.history_case(1, {**r, "rewrite": True})["expected"], r["final"])

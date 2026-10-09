@@ -66,6 +66,35 @@ class Fake(unittest.TestCase):
         self.assertEqual(store.clear_history(), 1)  # Delete all is the one rewrite that removes it
         self.assertEqual(self.hist.read_text(encoding="utf-8"), "")
 
+    def test_outcomes_append_merge_and_fold(self):  # set_outcome never rewrites history.jsonl
+        out = store.HOME / store.OUTCOMES
+        for ts in ("1", "2"):
+            store.append_history({"ts": ts, "final": "f"})
+        before = self.hist.read_text(encoding="utf-8")
+        store.set_outcome("1", "f", {"outcome": "edited", "sent": "secret fix"})
+        store.set_outcome("1", "f", {"outcome": "updated"})  # later records win
+        store.set_outcome("9", "gone", {"outcome": "unchanged"})  # no such row: ignored
+        with open(out, "a", encoding="utf-8") as f:
+            f.write("{torn\n!not-openable-here\n")
+        self.assertEqual(self.hist.read_text(encoding="utf-8"), before)
+        self.assertNotIn("secret", out.read_text(encoding="utf-8"))  # sealed like history
+        a, b = store.read_history()
+        self.assertEqual((a["outcome"], a["sent"]), ("updated", "secret fix"))
+        self.assertNotIn("outcome", b)
+        store.correct_last("2", "f", "F")  # any full rewrite folds the records in
+        self.assertEqual(out.read_text(encoding="utf-8"), "!not-openable-here\n")  # only the unopenable line is kept
+        self.assertEqual([r.get("outcome") for r in store.read_history()], ["updated", None])
+        store.set_outcome("2", "f", {"outcome": "unchanged"})
+        store.clear_history()
+        self.assertFalse(out.exists())  # Delete all leaves no outcome data
+
+    def test_seal_existing_seals_plain_outcomes(self):
+        store.append_history({"ts": "1", "final": "f"})
+        (store.HOME / store.OUTCOMES).write_text(json.dumps({"ts": "1", "final": "f", "fields": {"outcome": "edited"}}) + "\n", encoding="utf-8")
+        store.seal_existing()
+        self.assertFalse((store.HOME / store.OUTCOMES).exists())  # folded into the sealed history
+        self.assertEqual(store.read_history()[0]["outcome"], "edited")
+
     def test_seal_existing_migrates_once(self):
         self.hist.write_text("".join(json.dumps({"ts": str(i), "final": "plain"}) + "\n" for i in range(2)), encoding="utf-8")
         rec = store.HOME / "recordings"; rec.mkdir()

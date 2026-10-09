@@ -71,7 +71,18 @@ def _grade(words, tkey, tl):
         return "hard"
     if len(words) > 1 and any(w.lower() in FUNCTION_WORDS for w in words) or wkey[:1] != tkey[:1]:
         return None  # "Pete and" is not a sound-alike; a mishearing keeps its first sound ("tested" is not Podstead)
+    if sim < WEAK and _onset(wl) != _onset(tl):
+        return None  # a weak match keeps its first LETTER too: "Boates said" is not Podstead (b/p share a sound key), "pot set" is
     return "hint" if d <= (1 if len(tkey) < 5 else 2) and sim >= (0.7 if len(tl) <= 4 else 0.55) else None  # short names: closer
+
+
+WEAK = 0.7  # below this letter similarity a hint also needs the same first letter
+
+
+def _onset(letters):
+    """First letter with only spelling variants merged (c/q -> k, ph -> f), unlike sound_key's voicing merge (b = p)."""
+    s = "f" + letters[2:] if letters.startswith("ph") else letters
+    return {"c": "k", "q": "k"}.get(s[:1], s[:1])
 
 
 def _tokens(text):
@@ -128,11 +139,17 @@ def _best(words, term, tl, tkey):
             continue  # too different to bother
         g = _grade(ws, tkey, tl)
         plural = bool(n) and tl == _letters(term) and g is not None and sound_key(wl) == tkey  # singular sounds like the term
+        plural = plural or (g == "hint" and len(forms) > 1 and tl == _letters(term) and _needs_last(ws, tl))  # "pods heads" -> Podsteads
         if plural:
             g = "hint"
         if g:
             out.append((g, similarity(wl, tl), plural))
     return max(out, key=lambda g: (g[0] == "hard", g[1])) if out else None
+
+
+def _needs_last(words, tl):
+    """The last word is part of the match (dropping it scores worse): "pods heads" yes, "depgard works" no."""
+    return len(words) == 1 or similarity(_letters("".join(words[:-1])), tl) < similarity(_letters("".join(words)), tl)
 
 
 def _singular(words, tl):

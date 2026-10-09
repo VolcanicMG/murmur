@@ -13,10 +13,16 @@ def wide(cfg, chars=2000):
     return {**cfg, "context": {**c, "before_chars": max(c.get("before_chars", 600), chars), "after_chars": max(c.get("after_chars", 200), chars)}}
 
 
-def read_text(cfg, timeout=1.5):
-    """(foreground process, whole-field text around the caret) read-only, on a worker thread with a join cap; ('', '') on failure."""
+def read_text(cfg, expect_app=None, timeout=1.5):
+    """(foreground process, whole-field text around the caret) read-only, on a worker thread with a join cap; ('', '') on failure.
+    The text is never read (app, '') when the foreground app is a no_copy terminal or isn't `expect_app` (when given)."""
     got = {}
-    t = threading.Thread(target=lambda: got.update(app=win.active_app()[0], f=read_field(wide(cfg), text=True)), daemon=True)
+
+    def work():
+        got["app"] = app = win.active_app()[0]
+        if app not in store.no_copy(cfg) and (expect_app is None or app == expect_app):
+            got["f"] = read_field(wide(cfg), text=True)
+    t = threading.Thread(target=work, daemon=True)
     t.start(); t.join(timeout)
     f = got.get("f") or {}
     if f.get("password"):

@@ -29,8 +29,19 @@ def load_model(cfg):
                 raise
             _model = onnx_asr.load_model(None, custom, quantization=None)
         return
-    bundled = model_dir() if (stt.get("model", DEFAULT_MODEL), quant) == (DEFAULT_MODEL, DEFAULT_QUANT) and model_dir().is_dir() else None
-    _model = onnx_asr.load_model(stt.get("model", DEFAULT_MODEL), bundled, quantization=quant)
+    name = model_name(stt)
+    bundled = model_dir() if (name, quant) == (DEFAULT_MODEL, DEFAULT_QUANT) and model_dir().is_dir() else None
+    _model = onnx_asr.load_model(name, bundled, quantization=quant)
+
+
+LEGACY_DEFAULT = "nemo-parakeet-tdt-0.6b-v3"  # the old default, written into every saved config.toml before v2 shipped
+
+
+def model_name(stt):
+    """[stt] model, with the old default read as the current one: Settings never offered a model name, so a saved v3 is the
+    stale default, not a choice (it kept every install on v3 int8: 21.6% vs v2's 16.4% word errors on Ethan's takes)."""
+    name = stt.get("model") or DEFAULT_MODEL
+    return DEFAULT_MODEL if name == LEGACY_DEFAULT else name
 
 
 def fetch(dest=None):

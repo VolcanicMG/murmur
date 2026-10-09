@@ -122,6 +122,7 @@ class ModelDir(unittest.TestCase):
         fake.load_model = lambda name, path=None, quantization=None: calls.append((name, path, quantization))
         saved = sys.modules.get("onnx_asr"); sys.modules["onnx_asr"] = fake
         sys.modules.pop("murmur.stt", None)
+        import murmur; murmur.__dict__.pop("stt", None)  # else `from murmur import stt` returns another test's copy
         try:
             from murmur import stt
             self.assertEqual(stt.model_dir().parts[-3:], ("packaging", "models", "parakeet"))

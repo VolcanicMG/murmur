@@ -5,8 +5,8 @@ from . import llm, phonetic, store
 from .prepass import restore_term_case  # noqa: F401
 from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, digits_before_units, find_cue, has_scratch,  # noqa: F401  (re-exports)
                       restore_breaks, restore_prose_identifiers, restore_quotes, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
-from .learn import (clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
-                    redictation_terms)
+from .learn import (classify_edit, clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
+                    learn_from_result, redictation_terms)
 
 log = logging.getLogger("murmur")
 

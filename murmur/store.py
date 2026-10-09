@@ -112,7 +112,7 @@ neutral = "Tone: neutral. Plain, natural writing."
 code = "Tone: code context. Preserve identifiers (camelCase, snake_case, kebab-case) and CLI commands verbatim; no trailing period on a lone command; write spoken file names like 'app dot py' as `app.py`. Only format as an identifier what the speaker clearly spells as one (letter by letter, 'underscore', camel case) or that already exists in the surrounding code; ordinary noun phrases like 'max retry count variable' stay prose. Write numbers as digits (5, not five). Treat ordinary sentences as ordinary text."
 
 [stt]
-model = "nemo-parakeet-tdt-0.6b-v3"
+model = "nemo-parakeet-tdt-0.6b-v2"
 quantization = "int8"
 path = ""  # a folder with your own onnx-asr model (config.json + .onnx); empty = the bundled Parakeet
 
@@ -322,15 +322,46 @@ def _read_history_unlocked(n=None, unreadable=None):
         except (ValueError, seal.SealedError):
             if unreadable is not None and l.startswith("!"):
                 unreadable.insert(0, l)
-    return rows[::-1]
+    rows = rows[::-1]
+    newest = {(r.get("ts"), r.get("final")): r for r in rows}  # a duplicate ts+final: the newest row wins, as in _edit_row
+    for ts, final, fields in _outcomes_unlocked():  # oldest first: later records win
+        if r := newest.get((ts, final)):
+            r.update(fields)
+    return rows
+
+
+OUTCOMES = "outcomes.jsonl"  # appended paste outcomes, folded into history.jsonl by the next full rewrite
+
+
+def _outcomes_unlocked(unreadable=None):
+    """[(ts, final, fields)] from outcomes.jsonl, oldest first; torn/corrupt lines are skipped, sealed lines that can't be
+    opened here go to `unreadable` (when given) verbatim."""
+    p = HOME / OUTCOMES
+    out = []
+    for l in p.read_text(encoding="utf-8").splitlines() if p.exists() else []:
+        try:
+            o = json.loads(seal.open_line(l))
+            out.append((o["ts"], o["final"], dict(o["fields"])))
+        except (ValueError, KeyError, TypeError, seal.SealedError):
+            if unreadable is not None and l.startswith("!"):
+                unreadable.append(l)
+    return out
 
 
 def _write_history_unlocked(rows, unreadable=()):
-    """Atomically replace history.jsonl with `unreadable` (kept verbatim) + `rows`, every row sealed. Caller holds _locked()."""
+    """Atomically replace history.jsonl with `unreadable` (kept verbatim) + `rows`, every row sealed, then drop outcomes.jsonl:
+    `rows` came from _read_history_unlocked, so its records are already in them (a crash in between re-applies them, which
+    is idempotent). Unopenable outcome lines are kept. Caller holds _locked()."""
     tmp = HOME / "history.jsonl.tmp"
     tmp.write_text("".join(l + "\n" for l in unreadable) + "".join(seal.seal_line(json.dumps(r, ensure_ascii=False)) + "\n" for r in rows),
                    encoding="utf-8")
     os.replace(tmp, HOME / "history.jsonl")
+    _outcomes_unlocked(keep := [])
+    if keep:
+        (HOME / (OUTCOMES + ".tmp")).write_text("".join(l + "\n" for l in keep), encoding="utf-8")
+        os.replace(HOME / (OUTCOMES + ".tmp"), HOME / OUTCOMES)
+    else:
+        (HOME / OUTCOMES).unlink(missing_ok=True)
 
 
 def _edit_row(ts, final, change):
@@ -347,6 +378,15 @@ def _edit_row(ts, final, change):
 def correct_last(ts, final, edited):
     """Set `corrected` on the newest history entry matching ts and final (atomic rewrite)."""
     _edit_row(ts, final, lambda rows, r: r.update(corrected=edited))
+
+
+def set_outcome(ts, final, fields):
+    """Record what the user did with a paste (outcome, edits, added, rewrite, outcome_source, sent?/corrected?) for the newest
+    history row matching ts and final: ONE sealed line appended to outcomes.jsonl (never a history rewrite, which costs
+    ~0.5 ms per row under the lock the next paste needs); reads merge it, the next full rewrite folds it in. Rows nobody
+    observed keep no `outcome` (unknown)."""
+    with _locked(), open(HOME / OUTCOMES, "a", encoding="utf-8") as f:
+        f.write(seal.seal_line(json.dumps({"ts": ts, "final": final, "fields": fields}, ensure_ascii=False)) + "\n")
 
 
 def delete_row(ts, final):
@@ -562,6 +602,7 @@ def clear_history():
     with _locked():
         n = len(_read_history_unlocked())
         _write_history_unlocked([])
+        (HOME / OUTCOMES).unlink(missing_ok=True)  # Delete all leaves no outcome data, unopenable lines included
     return n
 
 
@@ -602,8 +643,8 @@ def seal_existing(dirs=()):
     rows = files = 0
     try:
         with _locked():
-            p = HOME / "history.jsonl"
-            plain = [l for l in (p.read_text(encoding="utf-8").splitlines() if p.exists() else []) if l.strip() and not l.startswith("!")]
+            plain = [l for p in (HOME / "history.jsonl", HOME / OUTCOMES)  # a rewrite seals both (outcomes fold into history)
+                     for l in (p.read_text(encoding="utf-8").splitlines() if p.exists() else []) if l.strip() and not l.startswith("!")]
             if plain:
                 rows_now = _read_history_unlocked(unreadable=(bad := []))
                 _write_history_unlocked(rows_now, bad)

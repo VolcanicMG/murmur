@@ -251,5 +251,18 @@ class Placeholder(unittest.TestCase):
         self.assertFalse(context.placeholder("Text Editor", ("Hello there", "", "", True)))
 
 
+class ReadText(unittest.TestCase):  # the paste watch's read
+    def test_terminals_and_other_apps_are_never_read(self):
+        context = load_context()
+        reads, cfg = [], {"apps": {"no_copy": ["windowsterminal.exe"]}}
+        field = lambda *a, **k: reads.append(1) or {"before": "ab", "selected": "", "after": "c"}
+        for fg, expect, want in (("code.exe", None, ("code.exe", "abc")), ("code.exe", "code.exe", ("code.exe", "abc")),
+                                 ("slack.exe", "code.exe", ("slack.exe", "")), ("windowsterminal.exe", None, ("windowsterminal.exe", ""))):
+            reads.clear()
+            with mock.patch.object(context.win, "active_app", return_value=(fg, "t")), mock.patch.object(context, "read_field", field):
+                self.assertEqual(context.read_text(cfg, expect), want, fg)
+            self.assertEqual(len(reads), 1 if want[1] else 0, fg)
+
+
 if __name__ == "__main__":
     unittest.main()

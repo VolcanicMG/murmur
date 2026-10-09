@@ -233,9 +233,21 @@ class Adapt(unittest.TestCase):  # Track B wiring
             with mock.patch.object(self.session.win, "active_app", return_value=("code.exe", "t")), mock.patch.object(self.session.win, "insert"), \
                     mock.patch.object(self.session.store, "append_history"), mock.patch.object(self.session.store, "read_history", return_value=[]), \
                     mock.patch.object(self.session.autolearn, "remember") as rem, mock.patch.object(self.session.autolearn, "count_dictation") as cnt, \
-                    mock.patch.object(self.session.autolearn, "schedule") as sched:
+                    mock.patch.object(self.session.autolearn, "watch") as sched:
                 s._paste_and_log("Hello there.")
             self.assertEqual((rem.called, cnt.called, sched.called), (expect,) * 3, (private, mode))
+
+    def test_dictation_log_line_has_sizes_never_text(self):
+        s, _ = make(self.session, "secret words", ctx={"tone": "neutral", "before": "abc secret", "after": "", "sel_known": True})
+        s.mode, s.segments, s.redecoded, s.live_use = "dictate", 2, True, "reused"
+        with self.assertLogs("murmur", "INFO") as cm:
+            s._log_dictation()
+        self.assertEqual(cm.output[-1].split(":", 2)[-1], "dictation app=code.exe text=read before=10 after=0 sel=known "
+                         "segments=2 redecoded=yes live=reused guard=ok")
+        s.cfg["privacy"] = {"private": True}
+        with self.assertLogs("murmur", "INFO") as cm:
+            s._log_dictation()
+        self.assertTrue(cm.output[-1].endswith(":dictation private"))
 
     def test_model_starting_label(self):
         s, ov = make(self.session)
