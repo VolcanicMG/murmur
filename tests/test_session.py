@@ -243,7 +243,7 @@ class Adapt(unittest.TestCase):  # Track B wiring
         with self.assertLogs("murmur", "INFO") as cm:
             s._log_dictation()
         self.assertEqual(cm.output[-1].split(":", 2)[-1], "dictation app=code.exe text=read before=10 after=0 sel=known "
-                         "segments=2 redecoded=yes live=reused guard=ok")
+                         "anchor=none segments=2 redecoded=yes live=reused guard=ok")
         s.cfg["privacy"] = {"private": True}
         with self.assertLogs("murmur", "INFO") as cm:
             s._log_dictation()

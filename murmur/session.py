@@ -255,6 +255,7 @@ class Session:
                 log.exception("workspace index failed")
 
     def _anchor(self, rect, kind="field"):
+        self.anchor_kind = kind  # last placement, for the dictation log line
         if self.current():
             self._post(lambda: self.ov.anchor(rect, kind))
 
@@ -581,9 +582,9 @@ class Session:
             return
         c = self.ctx
         sel = "none" if "before" not in c else "known" if c.get("sel_known") else "unknown"
-        log.info("dictation app=%s text=%s before=%d after=%d sel=%s segments=%d redecoded=%s live=%s guard=%s", self.app,
+        log.info("dictation app=%s text=%s before=%d after=%d sel=%s anchor=%s segments=%d redecoded=%s live=%s guard=%s", self.app,
                  "blocked" if self.app in store.no_copy(self.cfg) else "read", len(c.get("before", "")), len(c.get("after", "")),
-                 sel, self.segments, "yes" if self.redecoded else "no", self.live_use, "raw" if self.kept_raw or self.degraded else "ok")
+                 sel, getattr(self, "anchor_kind", "none"), self.segments, "yes" if self.redecoded else "no", self.live_use, "raw" if self.kept_raw or self.degraded else "ok")
 
     def _adapt(self, entry, final):
         """Feed the learners after a dictate paste (never reached in private mode or for password fields)."""

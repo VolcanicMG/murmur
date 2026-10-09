@@ -99,7 +99,9 @@ def _read(auto, opts):
     anchored = bool(rect) and _anchor(on_rect, [lambda: _line_rect(auto, sel)], rect)
     out = (_from_text_pattern(auto, ctl) or _from_value_pattern(auto, ctl)) if want_text else None
     if rect and not anchored:
-        _anchor(on_rect, [lambda: _point_rect(auto, sel), lambda: _caret2_rect(auto, ctl), _msaa_caret, win.caret_rect], rect, force=True)
+        anchored = _anchor(on_rect, _caret_providers(auto, ctl, sel), rect, force=True)
+    if rect and not anchored:  # own thread: callers read "reader still alive" as "selection not known yet"
+        threading.Thread(target=_wake_thread, args=(on_rect, rect), daemon=True).start()
     meta = {"control_name": _control_name(ctl)}
     if thread and out:
         meta["thread"] = thread_text(ctl, thread)
@@ -229,6 +231,35 @@ def _anchor(on_rect, providers, ctl_rect, force=False):
     elif force:
         on_rect(rect, kind)
     return kind == "caret"
+
+
+def _caret_providers(auto, ctl, sel):
+    """The slower caret providers after the line rect, in order."""
+    return [lambda: _point_rect(auto, sel), lambda: _caret2_rect(auto, ctl), _msaa_caret, win.caret_rect]
+
+
+WAKE_S = 0.3  # Chromium/Electron build their accessibility tree on the first UIA request; this is how long we give it
+
+
+def _wake_thread(on_rect, ctl_rect):
+    try:
+        import uiautomation as auto
+        with auto.UIAutomationInitializerInThread():
+            _wake_anchor(auto, on_rect, ctl_rect)
+    except Exception as e:
+        log.debug("wake anchor failed: %s", e)
+
+
+def _wake_anchor(auto, on_rect, ctl_rect):
+    """No caret on the first pass: Chromium apps (Discord, Brave, VS Code) answered before their accessibility tree existed,
+    so the card sat on the window-sized fallback until the NEXT dictation. Ask once more after WAKE_S and move the card if a
+    caret turns up. Geometry only: no text is read here."""
+    time.sleep(WAKE_S)
+    ctl = auto.GetFocusedControl()
+    rect = _control_rect(ctl) or ctl_rect
+    sel = _selection_range(auto, ctl)
+    _anchor(on_rect, [lambda: _line_rect(auto, sel)] + _caret_providers(auto, ctl, sel), rect)
+    del ctl, sel  # no COM object may outlive the initializer
 
 
 def _selection_range(auto, ctl):

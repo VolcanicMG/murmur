@@ -264,5 +264,26 @@ class ReadText(unittest.TestCase):  # the paste watch's read
             self.assertEqual(len(reads), 1 if want[1] else 0, fg)
 
 
+class WakeAnchor(unittest.TestCase):  # Ethan 10-09: card sat on Discord's window fallback until the next dictation
+    def test_a_caret_found_on_the_second_ask_moves_the_card(self):
+        c = load_context()
+        got = []
+        auto = SimpleNamespace(GetFocusedControl=lambda: object())
+        with mock.patch.object(c, "WAKE_S", 0), mock.patch.object(c, "_control_rect", lambda ctl: (0, 0, 900, 700)), \
+             mock.patch.object(c, "_selection_range", lambda a, ctl: None), \
+             mock.patch.object(c, "_line_rect", lambda a, sel: (380, 640, 900, 660)), \
+             mock.patch.object(c, "_caret_providers", lambda a, ctl, sel: []):
+            c._wake_anchor(auto, lambda r, k: got.append((r, k)), (0, 0, 900, 700))
+        self.assertEqual(got, [((0, 640, 900, 660), "caret")])
+
+    def test_still_no_caret_leaves_the_fallback_alone(self):
+        c = load_context()
+        got = []
+        with mock.patch.object(c, "WAKE_S", 0), mock.patch.object(c, "_control_rect", lambda ctl: None), \
+             mock.patch.object(c, "_selection_range", lambda a, ctl: None), mock.patch.object(c, "_line_rect", lambda a, sel: None), \
+             mock.patch.object(c, "_caret_providers", lambda a, ctl, sel: []):
+            c._wake_anchor(SimpleNamespace(GetFocusedControl=lambda: object()), lambda r, k: got.append((r, k)), (0, 0, 900, 700))
+        self.assertEqual(got, [])
+
 if __name__ == "__main__":
     unittest.main()
