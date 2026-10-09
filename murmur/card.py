@@ -19,9 +19,9 @@ STATES = {
     "listening": ("Listening", ACCENT, TEXT, "live", True, False, None, "Start speaking\u2026", True),
     "transcribing": ("Listening", ACCENT, TEXT, "live", True, False, None, "", True),
     "polishing": ("Polishing", ACCENT, TEXT, "wave", True, False, None, "", True),
-    "pasted": ("Pasted", SUCCESS, TEXT, "flat", False, False, 1200, "", False),
+    "pasted": ("Pasted", SUCCESS, TEXT, "flat", False, False, 800, "", False),
     "command": ("Command", ACCENT, CMD_TEXT, "live", True, False, None, "", True),
-    "done": ("Done", SUCCESS, TEXT, "flat", False, False, 1600, "", False),
+    "done": ("Done", SUCCESS, TEXT, "flat", False, False, 1100, "", False),
     "error": ("No microphone", ERROR, ERR_TEXT, "grey", False, True, 8000,
               "No microphone detected. Plug one in or pick another input in Settings.", False),
     "loading": ("Starting", SECONDARY, TEXT, "progress", False, False, None, "Loading speech model\u2026", False),  # grey: not listening

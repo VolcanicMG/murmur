@@ -20,12 +20,14 @@ def clean_word(text):
 def learn_dictionary(final, edited):
     """Words added in `edited` that look like names/terms; ordinary sentence-start words are filtered by COMMON."""
     seen, out = set(re.findall(WORD, final)), []
+    low = {x.lower() for x in seen}
     for m in re.finditer(WORD, edited):
         w = m.group()
         if w in seen or w in out or w.lower() in COMMON or re.fullmatch(r"[\d.,:/-]+", w) or not _looks_like_term(w):
             continue
-        if w[:1].isupper() and w[1:].islower() and re.search(r"(?:^|[.!?]\s+)$", edited[:m.start()]) and not any(phonetic.phonetic_fix(final, [w])[1:]):
-            continue  # sentence-start capital ("Ask", "Eggs"): a name only if it fixes a sound-alike ("pod stead" -> Podstead)
+        if w[:1].isupper() and w[1:].islower() and re.search(r"(?:^|[.!?])[^\w]*$", edited[:m.start()]) and (
+                w.lower() in low or not any(phonetic.phonetic_fix(final, [w])[1:])):
+            continue  # sentence-start capital ("Ask", "Eggs", "🎯 Throw"): a name only if it fixes a sound-alike ("pod stead" -> Podstead)
         out.append(w)
     return out
 
@@ -85,10 +87,13 @@ def _bare(w):
     return re.sub(r"[^\w]", "", w.lower())
 
 
-def _close(a, b):
-    """Is word `a` plausibly a misspelling/mishearing of `b`: letters >= 0.6 alike, or the same sound key."""
+MERGE_SIM = 0.75  # words merged/split by an edit must be closer ("pot stead" -> Podstead 0.88; "Can you throw" -> "Throw" 0.63 is a rewrite)
+
+
+def _close(a, b, sim=0.6):
+    """Is word `a` plausibly a misspelling/mishearing of `b`: letters >= `sim` alike, or the same sound key."""
     x, y = _bare(a), _bare(b)
-    return x == y or difflib.SequenceMatcher(None, x, y).ratio() >= 0.6 or (bool(x) and phonetic.sound_key(x) == phonetic.sound_key(y))
+    return x == y or difflib.SequenceMatcher(None, x, y).ratio() >= sim or (bool(x) and phonetic.sound_key(x) == phonetic.sound_key(y))
 
 
 def edit_is_a_correction(pasted, edited):
@@ -103,7 +108,7 @@ def edit_is_a_correction(pasted, edited):
         if i2 - i1 == j2 - j1:
             if not all(_close(x, y) for x, y in zip(a[i1:i2], b[j1:j2])):
                 return False
-        elif not _close("".join(a[i1:i2]), "".join(b[j1:j2])):
+        elif not _close("".join(a[i1:i2]), "".join(b[j1:j2]), MERGE_SIM):
             return False
     return True
 

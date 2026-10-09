@@ -211,6 +211,12 @@ class T(unittest.TestCase):
         self.assertEqual(a("The 2.0 release ships. Never mind that."), "")
         self.assertEqual(a("Mail a.b@example.com now. Hello there. Scratch that."), "Mail a.b@example.com now.")
 
+    def test_scratch_that_replaces_only_the_clause_a_short_correction_repeats(self):  # Ethan 10-08: got "Other repos."
+        a = brain.apply_scratch
+        self.assertEqual(a("Same format as the vaults, other items. Scratch that. Other repos."), "Same format as the vaults, other repos.")
+        self.assertEqual(a("Call me tomorrow, okay. Scratch that. Text me."), "Text me.")  # no shared first word: whole sentence
+        self.assertEqual(a("Let's meet Tuesday. Scratch that. Let's meet Wednesday."), "Let's meet Wednesday.")
+
     def test_scratch_that_after_a_frame_word_is_ordinary_speech(self):  # D1b
         for t in ("Don't scratch that.", "I told you to scratch that.", "Please do not scratch that", "We should just scratch that"):
             self.assertFalse(brain.has_scratch(t), t)

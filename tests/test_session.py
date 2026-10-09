@@ -279,5 +279,29 @@ class Commit(unittest.TestCase):
         self.assertEqual((s.committed, s.buf), ("hello there", []))
 
 
+class LongTake(unittest.TestCase):
+    def test_committed_take_is_decoded_again_whole(self):  # Ethan 10-08: cuts misheard "vaults" as "bolts"
+        session = load_session()
+        s, _ = make(session)
+        s.full, s.buf, s.committed = [[0] * 16000] * 20, [[0] * 16000] * 5, "same format as the bolts"
+        with mock.patch.object(session, "transcribe", lambda f: f"whole{len(f)}"):
+            self.assertEqual(s._final_transcript(), "whole20")
+            s.full = [[0] * 16000] * (session.REDECODE_S + 1)  # too long: committed + open as before
+            self.assertEqual(s._final_transcript(), "same format as the bolts whole5")
+            s.committed = ""
+            self.assertEqual(s._final_transcript(), "whole5")
+
+    def test_reader_sees_the_app_before_it_reads(self):  # Ethan 10-08: terminal scrollback reached the prompt (app was "")
+        session = load_session()
+        s, _ = make(session, app="")
+        seen = []
+        s.mic = SimpleNamespace(attach=lambda cb: None)
+        with mock.patch.object(session.context, "gather", lambda cfg: {"app": "windowsterminal.exe", "title": "t", "tone": "code"}), \
+             mock.patch.object(session.threading, "Thread", lambda target, daemon: SimpleNamespace(start=lambda: seen.append(s.app))), \
+             mock.patch.object(session, "sd"), mock.patch.object(session, "mic"):
+            s.ov.show = lambda *a: None
+            self.assertTrue(s._start())
+        self.assertEqual(seen, ["windowsterminal.exe"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -198,6 +198,17 @@ def _last_end(text):
     return ends[-1] if ends else -1
 
 
+def _keep_clause(kept, gone, post):
+    """A short correction that starts like the scratched sentence's last clause replaces only that clause: "Same format as
+    the vaults, other items. Scratch that. Other repos." -> "Same format as the vaults, other repos." (<= 4 words each)."""
+    head, comma, last = gone.rpartition(",")
+    post = re.sub(r"^[\s,;:.!?-]+", "", post)
+    rep, lw = re.match(r"[^.!?]*", post).group().split(), last.split()
+    if not comma or not rep or not lw or len(rep) > 4 or len(lw) > 4 or _edge(rep[0]) != _edge(lw[0]):
+        return kept, post
+    return f"{kept}{head},", lw[0] + post[len(rep[0]):]
+
+
 def apply_scratch(raw):
     """Deterministic 'scratch that': drop each cue and the sentence segment before it (back to the previous . ! ? or the
     start; filler-only fragments are skipped over). Text after the cue in the same sentence is kept as the replacement.
@@ -207,12 +218,14 @@ def apply_scratch(raw):
         i = _last_end(pre)
         kept, seg = pre[:i + 1], pre[i + 1:]
         if _blank(seg):  # cue opens its sentence: it scratches the previous sentence instead
+            gone = ""
             while kept:
                 body = kept.rstrip()[:-1]  # drop the final delimiter
                 j = _last_end(body)
                 gone, kept = body[j + 1:], body[:j + 1]
                 if not _blank(gone):
                     break
+            kept, post = _keep_clause(kept, gone, post)
         post = re.sub(r"^[\s,;:.!?-]+", "", post)
         raw = (kept.rstrip() + " " + post).strip()
     return "" if _blank(raw) else spoken_forms(raw)

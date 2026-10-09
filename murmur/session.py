@@ -9,6 +9,7 @@ from . import audio, mic, autolearn, brain, capture, context, cues, llm, phoneti
 log = logging.getLogger("murmur")
 UNDO_WINDOW = 60  # seconds after our last paste during which "scratch that" sends ctrl+z
 MAX_SESSION = 600  # hard cap on one recording, seconds
+REDECODE_S = 90  # ponytail: long takes up to this are decoded again whole at release (~0.02 s per audio second); chunk-with-overlap if longer takes need it
 REDICT_WINDOW = 90  # seconds within which a near-identical dictation counts as a correction
 
 
@@ -51,7 +52,7 @@ class Session:
         self.committed, self.tag_index, self.silent, self.marks = "", None, False, {}  # marks: latency stage times (capture.stages)
         self.verdict, self._pw, self._unknown = context.Verdict(), None, False  # password verdict: published early, frozen at release
         self.rms, self.live_route, self.hint = [], "primary", ""  # per-block RMS aligned with buf (forced segment cuts); route of the live clean; the card hint
-        self.full = [] if cfg.get("audio", {}).get("keep_recordings", 0) else None  # every frame of the take, for keep_recordings (buf loses committed segments)
+        self.full = []  # every frame of the take (buf loses committed segments): the whole-take decode and keep_recordings
 
     def _cue(self, name):
         """Audio cue (async, honours [ui] sounds); never raises."""
@@ -96,7 +97,7 @@ class Session:
             self.t_end, self.marks["stopped"] = time.time(), time.monotonic()  # recording length for the speaking metrics
             if self.cancelled or time.time() - self.t0 < 0.3:
                 return
-            self.raw = self._compose(transcribe(self.buf))
+            self.raw = self._final_transcript()
             self.marks["heard"] = time.monotonic()
             if self.raw and not self.committed and capture.hallucinated(self.raw, self.vad["speech_s"]):
                 log.info("dropped %d words: %.2f s of speech detected", len(self.raw.split()), self.vad["speech_s"])
@@ -133,6 +134,14 @@ class Session:
         finally:
             self._release_last()
             self._cleanup()
+
+    def _final_transcript(self):
+        """The take's transcript at release. Committed segments were decoded without the words on the other side of each cut,
+        which costs accuracy there (Ethan's 10-08 takes: "vaults" -> "bolts", "Life 360" -> "Life Through Sixty"), so a take
+        of up to REDECODE_S is decoded again in one piece; the segments only ever fed the live card."""
+        if self.committed and sum(len(f) for f in self.full) <= REDECODE_S * 16000:
+            return transcribe(self.full) or self._compose(transcribe(self.buf))
+        return self._compose(transcribe(self.buf))
 
     def _compose(self, open_text):
         """Full transcript: committed long-dictation segments plus the still-open one."""
@@ -188,8 +197,7 @@ class Session:
     def _audio(self, d, *_):
         rms = self.ov.level = float(np.sqrt(np.mean(d * d)))
         self.rms.append(rms)  # before buf, so rms is never shorter than buf
-        if self.full is not None:
-            self.full.append(d.copy())
+        self.full.append(d.copy())
         self.buf.append(d.copy())
         prob = self.vad_model.safe(d[:, 0]) if self.vad_model else None  # Silero when bundled, else the energy test
         self.vad, decision = capture.vad_step(self.vad, rms, len(d) / 16000, self.cfg.get("dictation", {}), prob)
@@ -220,9 +228,9 @@ class Session:
         self._cue("start")
         self.mark("recording")
         self.ctx = {"cfg": self.cfg, "private": True, **context.gather(self.cfg)}  # logs stay redacted until UIA clears the field
+        self.app, self.title = self.ctx["app"], self.ctx["title"]  # before the reader starts: _read_field gates terminals on self.app
         self.reader = threading.Thread(target=self._read_field, daemon=True)
         self.reader.start()  # UIA off the hotkey/Tk threads; live clean uses whatever has arrived
-        self.app, self.title = self.ctx["app"], self.ctx["title"]
         where = self.title or self.app
         self._post(lambda: self.ov.show(self.mode, where, self._handlers()))
         return True

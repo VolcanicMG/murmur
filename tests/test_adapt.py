@@ -314,6 +314,11 @@ class Round3(unittest.TestCase):  # Ethan 10-08 test round
         self.assertEqual(brain.learn_dictionary("We had eggs, bacon", "Eggs, bacon"), [])
         self.assertEqual(brain.learn_dictionary("pod stead is up", "Podstead is up"), ["Podstead"])  # a sound-alike fix still teaches
 
+    def test_a_recapitalised_word_after_a_symbol_is_not_a_name(self):  # Ethan 10-08: "Throw" learned from a terminal screen
+        pasted = "Can you throw out a detailed plan so tomorrow we can start on this?"
+        self.assertEqual(brain.learn_from_edit(pasted, "\U0001f3af Throw out a detailed plan so tomorrow we can start on this?"), ([], False))
+        self.assertEqual(brain.learn_from_edit("I deployed pot stead today.", "I deployed Podstead today."), (["Podstead"], True))
+
     def test_guard_counts_offered_hints_as_applied(self):  # "The pot set is up." -> "Podstead is up." was pasted raw
         self.assertFalse(brain.plausible("The pot set is up.", "Podstead is up."))
         judged = brain.with_hints("The pot set is up.", [("pot set", "Podstead")], "Podstead is up.")
