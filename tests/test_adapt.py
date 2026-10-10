@@ -429,6 +429,20 @@ class ClassifyEdit(unittest.TestCase):  # Ethan's real shapes
         self.assertEqual(brain.learn_from_result("Ask about the release.", r), ([], None))
 
 
+class DescribeOutcome(unittest.TestCase):  # the History panel's wording
+    def test_labels_and_details(self):
+        from murmur import learn
+        d = learn.describe_outcome
+        self.assertEqual(d({})[0], "")  # never observed: no label
+        self.assertEqual(d({"outcome": "unchanged"}), ("No changes", "Sent exactly as pasted."))
+        self.assertEqual(d({"outcome": "updated", "added": 5, "outcome_source": "claude-code"}),
+                         ("Updated", "Pasted text kept; 5 words added around it (from your Claude Code message)."))
+        row = {"outcome": "edited", "added": 1, "edits": [{"kind": "misheard", "from": "bolts", "to": "vaults"},
+                                                         {"kind": "restored", "from": "", "to": "no"}, {"kind": "removed", "from": "Okay,", "to": ""}]}
+        self.assertEqual(d(row), ("Edited", "Misheard: bolts → vaults · Put back: no · Removed: Okay, · 1 word added around it"))
+        self.assertEqual(d({"outcome": "edited", "rewrite": True, "edits": []}), ("Edited", "Rewritten"))
+
+
 class OutcomeFields(unittest.TestCase):
     def test_record_writes_fields_and_only_edited_rows_get_sent(self):
         store.HOME = Path(tempfile.mkdtemp()); store.ensure()

@@ -186,6 +186,29 @@ def classify_edit(pasted, sent):
     return res
 
 
+OUTCOME_LABELS = {"unchanged": "No changes", "edited": "Edited", "updated": "Updated"}
+EDIT_LABELS = {"misheard": "Misheard", "word_choice": "Reworded", "restored": "Put back", "removed": "Removed"}
+
+
+def describe_outcome(row):
+    """(label, detail) of a history row's paste outcome for the History panel: "No changes" | "Edited" | "Updated", or
+    ("", ...) when the paste was never observed. detail spells out the edits ("Misheard: bolts → vaults")."""
+    label = OUTCOME_LABELS.get(row.get("outcome"), "")
+    if not label:
+        return "", "Not tracked: murmur didn't see what happened to this paste."
+    src = " (from your Claude Code message)" if row.get("outcome_source") == "claude-code" else ""
+    added = row.get("added") or 0
+    more = f"{added} word{'s' if added != 1 else ''} added around it" if added else ""
+    if row["outcome"] == "unchanged":
+        return label, f"Sent exactly as pasted{src}."
+    if row["outcome"] == "updated":
+        return label, f"Pasted text kept; {more or 'text added around it'}{src}."
+    parts = ["Rewritten"] if row.get("rewrite") else [
+        f"{EDIT_LABELS.get(e.get('kind'), 'Changed')}: " + " → ".join(x for x in (e.get("from"), e.get("to")) if x)
+        for e in row.get("edits") or []]
+    return label, " · ".join(parts + ([more] if more else [])) + src
+
+
 def learn_from_result(pasted, res):
     """Ethan's rule for a classify_edit result: (dictionary terms, `corrected` text or None). Only "misheard" edits teach
     terms (learn_dictionary over the user's span, kept to the words those edits typed, so its sentence-start and sound-alike

@@ -5,8 +5,8 @@ from pathlib import Path
 from tkinter import ttk
 from types import SimpleNamespace
 import pyperclip
-from . import cues, render, store, win
-from .theme import ACCENT, CMD_TEXT, ERROR, FIELD, FILL, HAIR, INPUT, NAME, ON_ACCENT, SECONDARY, SEL, SIDEBAR, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts
+from . import cues, learn, render, store, win
+from .theme import ACCENT, AMBER, CMD_TEXT, ERROR, FIELD, FILL, HAIR, INPUT, NAME, ON_ACCENT, SECONDARY, SEL, SIDEBAR, SUCCESS, TEXT, WHITE, blend, on_fill, pick_fonts
 from .devices import DEFAULT_MIC, HotkeyField, MicField, input_devices
 from .inputs import Select, TextField, frame_text
 from .widgets import Scrollbar, wheel_scroll, Chip, Pill, Tag, Tile, Toggle, photo, pill, put
@@ -244,7 +244,13 @@ def _set(box, text):
 
 def _row_values(r):
     mode = "Command" if r.get("mode") == "command" else "Dictation"
-    return r.get("ts", "").replace("T", " "), mode, r.get("app", ""), r.get("tone", ""), r["final"][:100].replace("\n", " ")
+    return (r.get("ts", "").replace("T", " "), mode, r.get("app", ""), r.get("tone", ""), learn.describe_outcome(r)[0],
+            r["final"][:100].replace("\n", " "))
+
+
+def _row_tags(r):
+    """Treeview can't colour one cell: command rows get the accent text, edited dictations the amber one."""
+    return ("command",) if r.get("mode") == "command" else ("edited",) if r.get("outcome") == "edited" else ()
 
 
 def row_detail(r):
@@ -264,15 +270,16 @@ def _history_page(content, ui, root, fix):
     tiles = {n: Tile(strip, ui, n) for n in ("Dictations", "Commands", "Words", "Minutes saved", "This week")}
     for i, t in enumerate(tiles.values()):
         t.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else k(8), 0))
-    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "mode", "app", "tone", "text"), show="headings", height=3))
-    tree.tag_configure("command", foreground=CMD_TEXT)  # Treeview can't colour one cell, so command rows get the accent text
-    for col, w in (("time", 140), ("mode", 80), ("app", 110), ("tone", 60), ("text", 380)):
+    box, tree = _scrolled(pg.body, lambda p: ttk.Treeview(p, columns=("time", "mode", "app", "tone", "outcome", "text"), show="headings", height=3))
+    tree.tag_configure("command", foreground=CMD_TEXT); tree.tag_configure("edited", foreground=AMBER)
+    for col, w in (("time", 140), ("mode", 80), ("app", 110), ("tone", 60), ("outcome", 90), ("text", 340)):
         tree.heading(col, text=col.capitalize(), anchor="w"); tree.column(col, width=k(w), anchor="w")
     pane = Panel(pg.body, ui, ""); pane.pack(side="bottom", fill="x", pady=(k(12), 0))  # packed before the table: it keeps its height, the table shrinks first
     box.pack(fill="both", expand=True)
-    cols = tk.Frame(pane.rows, bg=FIELD); cols.pack(fill="x"); cols.columnconfigure((0, 1), weight=1, uniform="c")
-    views = {}
-    for i, name in enumerate(("Raw", "Final")):
+    note = _label(pane.rows, ui, "", "body", SECONDARY, FIELD); note.pack(anchor="w", pady=(0, k(6)))  # what happened to the paste
+    cols = tk.Frame(pane.rows, bg=FIELD); cols.pack(fill="x"); cols.columnconfigure((0, 1, 2), weight=1, uniform="c")
+    views, only = {}, {"edited": False}
+    for i, name in enumerate(("Raw", "Final", "You sent")):
         _label(cols, ui, name, "label", SECONDARY, FIELD).grid(row=0, column=i, sticky="w", padx=(0 if i == 0 else k(12), 0))
         sbox, t = _scrolled(cols, lambda p: _text(p, ui, 4, mono=False), FIELD); t.config(state="disabled")
         sbox.grid(row=1, column=i, sticky="ew", padx=(0 if i == 0 else k(12), 0)); views[name] = t
@@ -280,7 +287,9 @@ def _history_page(content, ui, root, fix):
     def show_detail(r):
         meta, raw, final = row_detail(r) if r else ("Select a row to compare what was heard with what was typed.", "", "")
         pane.title.config(text=meta)
-        for name, txt in (("Raw", raw), ("Final", final)):
+        label, detail = learn.describe_outcome(r) if r and r.get("mode", "dictate") == "dictate" else ("", "")
+        note.config(text=f"{label} — {detail}" if label else detail, fg=AMBER if label == "Edited" else SECONDARY)
+        for name, txt in (("Raw", raw), ("Final", final), ("You sent", (r or {}).get("sent", ""))):
             views[name].config(state="normal"); _set(views[name], txt); views[name].config(state="disabled")
     tree.bind("<<TreeviewSelect>>", lambda e: show_detail(current()))
 
@@ -289,10 +298,10 @@ def _history_page(content, ui, root, fix):
         return rows[int(sel[0])] if sel else None
 
     def load():
-        rows[:] = store.read_history(300)[::-1]
+        rows[:] = [r for r in store.read_history(300)[::-1] if not only["edited"] or r.get("outcome") == "edited"]
         tree.delete(*tree.get_children())
         for i, r in enumerate(rows):
-            tree.insert("", "end", iid=str(i), values=_row_values(r), tags=("command",) if r.get("mode") == "command" else ())
+            tree.insert("", "end", iid=str(i), values=_row_values(r), tags=_row_tags(r))
         show_detail(None)
         s = store.stats(store.read_history())
         for name, v in zip(tiles, (s["dictations"], s["commands"], s["words"], f"~{s['minutes_saved']:.0f} min", s["week_words"])):
@@ -314,6 +323,11 @@ def _history_page(content, ui, root, fix):
         if r := current():
             store.delete_row(r["ts"], r["final"]); load()
     _pills(pg, ui, ("Copy", copy, "primary"), ("Copy raw", copy_raw, "secondary"), ("Fix\u2026", fix_row, "secondary"), ("Delete row", delete, "danger"), ("Refresh", load, "secondary"))
+
+    def toggle_edited():
+        only["edited"] = not only["edited"]
+        flt.relabel("Show all" if only["edited"] else "Edited only"); load()
+    flt = pill(pg.bar, ui, "Edited only", toggle_edited); flt.pack(side="left", padx=(0, k(8)))
     _armed_pill(pg.bar, ui, "Delete all", "Click again to delete every row", lambda: (store.clear_history(), load())).pack(side="right")
     return pg, load
 

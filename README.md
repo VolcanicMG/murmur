@@ -57,6 +57,8 @@ Say exactly "scratch that", "undo that", "undo" or "delete that" (fillers like "
 ### Auto-learn
 If you dictate a near-identical sentence (same app, within 90 s) that differs by 1-3 words, murmur treats it as a correction: changed names/terms go into the dictionary and the earlier history row is marked corrected, which feeds the few-shot corrections in the prompt.
 
+murmur also watches what happens to each paste (until you press Enter, switch apps or dictate again) and records it on the history row. **History** shows it in the **Outcome** column: `No changes`, `Updated` (you only added text around it) or `Edited` (you changed words inside it; blank = not seen). Selecting a row spells out the edits (`Misheard: bolts → vaults`, `Put back: no`, `Removed`, `Reworded`) and shows what you sent next to Raw and Final; **Edited only** filters to those rows. Only mishearings teach the dictionary. Terminals are never read: `python -m evals.build --claude-code` fills their outcomes from the messages you sent in Claude Code.
+
 ## Config (`~/.murmur/`)
 `config.toml` (hotkeys, llm, stt, per-app tones), `dictionary.txt` (preferred spellings), `snippets.toml` (say "insert sig"), `style.md` (generated), `history.jsonl`, `murmur.log`.
 
