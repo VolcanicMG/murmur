@@ -6,11 +6,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WIN_PY="${WIN_PY:-/mnt/c/Users/ethan/.murmur/venv/Scripts/python.exe}"
-BUILD_DIR="${BUILD_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build}"
-INSTALL_DIR="${INSTALL_DIR:-/mnt/c/Users/ethan/AppData/Local/Programs/murmur}"  # outside OneDrive: it caches stale icons and would sync the folder per build
-VAD_DIR="${VAD_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build-model/silero}"  # Silero VAD (2 MB), same cache
-MODEL_DIR="${MODEL_DIR:-/mnt/c/Users/ethan/AppData/Local/murmur-build-model/parakeet-v2}"  # speech model (stt.DEFAULT_MODEL), fetched once and kept across builds; the folder name must change with the model
+winpath() { wslpath -u "$(cd /mnt/c && cmd.exe /c "echo %$1%" 2>/dev/null | tr -d '\r')"; }  # a Windows env var as a WSL path
+WIN_HOME="$(winpath USERPROFILE)"; WIN_LOCAL="$(winpath LOCALAPPDATA)"
+WIN_PY="${WIN_PY:-$WIN_HOME/.murmur/venv/Scripts/python.exe}"
+BUILD_DIR="${BUILD_DIR:-$WIN_LOCAL/murmur-build}"
+INSTALL_DIR="${INSTALL_DIR:-$WIN_LOCAL/Programs/murmur}"  # outside OneDrive: it caches stale icons and would sync the folder per build
+VAD_DIR="${VAD_DIR:-$WIN_LOCAL/murmur-build-model/silero}"  # Silero VAD (2 MB), same cache
+MODEL_DIR="${MODEL_DIR:-$WIN_LOCAL/murmur-build-model/parakeet-v2}"  # speech model (stt.DEFAULT_MODEL), fetched once and kept across builds; the folder name must change with the model
 
 # Safety: the clean-replace below deletes everything inside these folders, so only ever do it to folders that look like ours.
 [[ "$(basename "$BUILD_DIR")" == "murmur-build" ]] || { echo "ERROR: BUILD_DIR must end in /murmur-build (got $BUILD_DIR)" >&2; exit 1; }

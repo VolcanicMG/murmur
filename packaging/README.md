@@ -6,7 +6,7 @@ Builds murmur into a folder: `dist/murmur/murmur.exe` (windowed, no console) plu
 ```bash
 ./packaging/build.sh
 ```
-Refuses to run (exit 1, clear message) while `murmur.exe` is running. Otherwise it stages `murmur/`, `murmur.spec` and `packaging/entry.py` to `%LOCALAPPDATA%\murmur-build`, runs PyInstaller through the Windows venv Python (`C:\Users\ethan\.murmur\venv`, PyInstaller 6.22.3), replaces the contents of `%LOCALAPPDATA%\Programs\murmur\` with the new folder (nothing user-owned lives there; settings and data are in `~/.murmur`) and (re)creates the Desktop shortcut `murmur.lnk` (target = that exe, icon = the exe's). The install stays out of OneDrive: it serves a stale icon for synced exes and would upload ~130 MB per build. ~20 s build, ~135 MB folder.
+Refuses to run (exit 1, clear message) while `murmur.exe` is running. Otherwise it stages `murmur/`, `murmur.spec` and `packaging/entry.py` to `%LOCALAPPDATA%\murmur-build`, runs PyInstaller through the Windows venv Python (`%USERPROFILE%\.murmur\venv`, PyInstaller 6.22.3), replaces the contents of `%LOCALAPPDATA%\Programs\murmur\` with the new folder (nothing user-owned lives there; settings and data are in `~/.murmur`) and (re)creates the Desktop shortcut `murmur.lnk` (target = that exe, icon = the exe's). The install stays out of OneDrive: it serves a stale icon for synced exes and would upload ~130 MB per build. ~20 s build, ~135 MB folder.
 
 ## Build on Windows / CI
 ```powershell

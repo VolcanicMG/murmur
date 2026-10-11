@@ -1,7 +1,7 @@
 """Caption Card overlay on the Tk main thread. Default renderer: a per-pixel-alpha layered window fed PIL frames from
 cardpaint.Painter (real translucency, shadow, anti-aliased shapes); fallback: a chroma-key Canvas (flag LAYERED / failure
 of UpdateLayeredWindow at startup). Design source of truth:
-C:\\Users\\ethan\\Downloads\\Dictation software interface design\\design_handoff_dictation_caption_card\\README.md
+the design handoff README (design_handoff_dictation_caption_card/README.md, not in this repo)
 
 Pure helpers (blend, bar_heights, norm_level, place, ellipsize) have no tk/win32 imports and are unit-tested on Linux.
 """

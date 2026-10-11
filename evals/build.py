@@ -6,7 +6,7 @@ what you actually said (and add checks); until then the case only guards against
 python -m evals.build --claude-code [DIR ...]: murmur never reads terminals, so for dictations pasted into one ([apps] no_copy)
 the message actually sent is looked up in Claude Code transcripts (default ~/.claude/projects, WSL's too) and the outcome is
 written back into history (outcome_source "claude-code") with the same learning rule as the live watch."""
-import argparse, bisect, json, shutil, sys, tomllib
+import argparse, bisect, glob, json, shutil, sys, tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,11 +14,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from murmur import autolearn, brain, seal, store  # noqa: E402  (history and recordings are sealed with DPAPI on Windows)
 
 HERE = Path(__file__).parent
-CANDIDATES = [Path.home() / ".murmur/history.jsonl", Path("/mnt/c/Users/ethan/.murmur/history.jsonl")]
-CC_CANDIDATES = [Path.home() / ".claude/projects", Path(r"\\wsl.localhost\Ubuntu-24.04\home\ethan\.claude\projects"),
-                 Path("/home/ethan/.claude/projects")]
+
+
+def _globs(*patterns):
+    """Existing paths matching the patterns: any user or distro on this machine, so no personal path is hardcoded."""
+    return [Path(p) for pat in patterns for p in sorted(glob.glob(pat))]
+
+
+def _wsl_distros():
+    """Installed WSL distro names from HKCU (\\\\wsl.localhost itself can't be globbed); [] off Windows."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Lxss") as k:
+            subs = [winreg.EnumKey(k, i) for i in range(winreg.QueryInfoKey(k)[0])]
+            return [winreg.QueryValueEx(winreg.OpenKey(k, n), "DistributionName")[0] for n in subs]
+    except (ImportError, OSError):
+        return []
+
+
+CANDIDATES = [Path.home() / ".murmur/history.jsonl", *_globs("/mnt/c/Users/*/.murmur/history.jsonl")]
+CC_CANDIDATES = [Path.home() / ".claude/projects",
+                 *_globs(*(rf"\\wsl.localhost\{d}\home\*\.claude\projects" for d in _wsl_distros()), "/home/*/.claude/projects")]
 CC_BEFORE, CC_AFTER = timedelta(seconds=5), timedelta(minutes=10)  # a message sent this close to a paste can carry it
-REC_CANDIDATES = [Path.home() / ".murmur/recordings", Path("/mnt/c/Users/ethan/.murmur/recordings")]
+REC_CANDIDATES = [Path.home() / ".murmur/recordings", *_globs("/mnt/c/Users/*/.murmur/recordings")]
 
 
 def draft_case(w):

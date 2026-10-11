@@ -3,16 +3,16 @@
 Local Wispr-Flow-style dictation. **Windows-only runtime, dev from WSL.** No classes where functions do; fewest files; pin every dependency exactly.
 
 ## Facts (verified)
-- Venv: `C:\Users\ethan\.murmur\venv\Scripts\python.exe` (pins in requirements.txt). CPU only, no CUDA.
+- Venv: `%USERPROFILE%\.murmur\venv\Scripts\python.exe` (pins in requirements.txt). CPU only, no CUDA.
 - STT: `onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3", quantization="int8")` loads ~2-13 s; transcribes 10 s of audio in ~0.3 s.
-- LLM: LM Studio at `http://localhost:1234/v1/chat/completions`, model `google/gemma-4-e4b`. Always send `"reasoning_effort": "none"` and `temperature: 0.2`. stdlib `urllib` only. CLI: `C:\Users\ethan\.lmstudio\bin\lms.exe` (`lms ps`, `lms load google/gemma-4-e4b --gpu max -y --context-length 8192`).
-- Test wav: `C:\Users\ethan\.murmur\test.wav` (16 kHz mono). Make more with Windows TTS (System.Speech SpeechSynthesizer.SetOutputToWaveFile).
+- LLM: LM Studio at `http://localhost:1234/v1/chat/completions`, model `google/gemma-4-e4b`. Always send `"reasoning_effort": "none"` and `temperature: 0.2`. stdlib `urllib` only. CLI: `%USERPROFILE%\.lmstudio\bin\lms.exe` (`lms ps`, `lms load google/gemma-4-e4b --gpu max -y --context-length 8192`).
+- Test wav: `%USERPROFILE%\.murmur\test.wav` (16 kHz mono). Make more with Windows TTS (System.Speech SpeechSynthesizer.SetOutputToWaveFile).
 - Mic, hotkeys and paste cannot be tested from WSL; cover them by `--selftest` + manual use.
 - `brain.py` and `store.py` have no win32 imports and run on Linux.
 
 ## Run (from WSL)
 ```
-powershell.exe -NoProfile -c 'cd \\wsl.localhost\Ubuntu-24.04\home\ethan\repos\murmur; C:\Users\ethan\.murmur\venv\Scripts\python -m murmur --selftest' | tr -d '\r'
+powershell.exe -NoProfile -c 'cd \\wsl.localhost\<distro>\home\<you>\repos\murmur; & "$env:USERPROFILE\.murmur\venv\Scripts\python" -m murmur --selftest' | tr -d '\r'
 ```
 cmd.exe can't cd to UNC; PowerShell can.
 
@@ -46,7 +46,7 @@ Build deps are pinned in `requirements-build.txt` (`pip install -r requirements-
 `murmur.spec` + `packaging/build.sh` build a one-FOLDER windowed app (`dist/murmur/murmur.exe` + `_internal/`, installed to `%LOCALAPPDATA%\Programs\murmur`; `build.ps1` is the CI/Windows twin; entry stub `packaging/entry.py`). Frozen gotchas: onnx-asr needs `copy_metadata` and its data files; a windowed exe hides startup tracebacks, so debug with a `console=True` copy of the spec.
 
 ## Overlay / card gotchas
-- Design source of truth: `C:\Users\ethan\Downloads\Dictation software interface design\design_handoff_dictation_caption_card\README.md`.
+- Design source of truth: the design handoff README (`design_handoff_dictation_caption_card/README.md`, not in this repo).
 - Default card renderer: `card.Layered` (`UpdateLayeredWindow` on the Tk toplevel's wrapper hwnd, premultiplied BGRA DIB, fade = `SourceConstantAlpha`, slide = window move) fed by `cardpaint.Painter` (PIL frames at the DPI scale; static layer, chip and text cached, per frame only halo + 64 bars; identical frame = same object = no ULW call). Never call `-alpha`/`-transparentcolor`/`SetLayeredWindowAttributes` on it. Window = card + shadow padding each side (derived from blur 30 / offset 10, at most 40 px); `place()` positions the VISIBLE card, window = card - pad. Fill alpha 0.97 (handoff 0.76 assumes acrylic blur, unavailable). Fallback (`card.LAYERED = False`, or ULW failing at startup): chroma-key Canvas (`-transparentcolor #010203`, `-alpha 0.96`, polygons: jagged, no shadow). DWM corner/dark attributes are used only on the settings window.
 - Anti-aliasing: Tk canvas shapes have none. Every curved shape (card, settings pills/chips/toggle/tiles/panels) is a `render.py` image (4x supersample, LANCZOS, LRU-cached shared RGBA: never mutate, `.copy()` first) shown via `ImageTk.PhotoImage` flattened onto the known canvas bg. Draw an overlay (e.g. the chip dot) INTO the shape image, not as a second flattened image, or it gets a dark fringe. Screenshot own windows with `PrintWindow(hwnd, dc, 2)` (settings) or CopyFromScreen (layered card); a venv `pythonw` is a launcher, kill the tree (`taskkill /T`).
 - The process is DPI-aware (`win.dpi_aware()` before any Tk root); every card/settings pixel size is multiplied by `win.dpi_scale()`.

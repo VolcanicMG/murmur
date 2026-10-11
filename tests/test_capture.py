@@ -144,7 +144,7 @@ class Ignore(unittest.TestCase):
 class Workspace(unittest.TestCase):
     def test_title_folder(self):
         f = workspace.title_folder
-        self.assertEqual(f("server.js - repos [WSL: Ubuntu-24.04] - Visual Studio Code"), "repos")
+        self.assertEqual(f("server.js - repos [WSL: Ubuntu] - Visual Studio Code"), "repos")
         self.assertEqual(f("\u25cf server.js \u2014 repos \u2014 Visual Studio Code"), "repos")
         self.assertEqual(f("app.py - murmur - Cursor"), "murmur")
         self.assertEqual(f("murmur - Visual Studio Code"), "murmur")
@@ -153,18 +153,18 @@ class Workspace(unittest.TestCase):
         self.assertEqual(f("Visual Studio Code"), None)
 
     def test_storage_folders_and_roots(self):
-        data = {"windowsState": {"lastActiveWindow": {"folder": "file:///c%3A/Users/ethan/repos/murmur"},
-                                 "openedWindows": [{"folder": "vscode-remote://wsl%2Bubuntu-24.04/home/ethan/repos"}, {"workspace": {}}]},
+        data = {"windowsState": {"lastActiveWindow": {"folder": "file:///c%3A/Users/sam/repos/murmur"},
+                                 "openedWindows": [{"folder": "vscode-remote://wsl%2Bubuntu/home/sam/repos"}, {"workspace": {}}]},
                 "backupWorkspaces": {"folders": [{"folderUri": "file:///c%3A/dev/other"}]}}
-        self.assertEqual(workspace.storage_folders(data), ["c:/Users/ethan/repos/murmur", "//wsl.localhost/ubuntu-24.04/home/ethan/repos", "c:/dev/other"])
+        self.assertEqual(workspace.storage_folders(data), ["c:/Users/sam/repos/murmur", "//wsl.localhost/ubuntu/home/sam/repos", "c:/dev/other"])
 
     def test_roots_for_reads_storage_json(self):
         import tempfile
         d = Path(tempfile.mkdtemp()); p = d / "Code" / "User" / "globalStorage"; p.mkdir(parents=True)
         (p / "storage.json").write_text(json.dumps({"windowsState": {"openedWindows": [
-            {"folder": "vscode-remote://wsl%2Bubuntu-24.04/home/ethan/repos"}, {"folder": "file:///c%3A/x/murmur"}]}}))
-        r = workspace.roots_for("code.exe", "a.js - repos [WSL: Ubuntu-24.04] - Visual Studio Code", {"code": {"roots": ["D:/extra"]}}, str(d))
-        self.assertEqual([x.as_posix() for x in r], ["//wsl.localhost/ubuntu-24.04/home/ethan/repos", "D:/extra"])
+            {"folder": "vscode-remote://wsl%2Bubuntu/home/sam/repos"}, {"folder": "file:///c%3A/x/murmur"}]}}))
+        r = workspace.roots_for("code.exe", "a.js - repos [WSL: Ubuntu] - Visual Studio Code", {"code": {"roots": ["D:/extra"]}}, str(d))
+        self.assertEqual([x.as_posix() for x in r], ["//wsl.localhost/ubuntu/home/sam/repos", "D:/extra"])
         self.assertEqual(workspace.roots_for("notepad.exe", "x", {}), [])
 
     def test_tag_files(self):

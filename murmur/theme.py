@@ -1,5 +1,5 @@
 """Shared design tokens (card, tray icon, settings). Source of truth:
-C:\\Users\\ethan\\Downloads\\Dictation software interface design\\design_handoff_dictation_caption_card\\README.md
+the design handoff README (design_handoff_dictation_caption_card/README.md, not in this repo)
 Pure module: no tk/win32 imports, so it is unit-tested on Linux.
 """
 ACCENT, SUCCESS, ERROR, AMBER = "#8E93F7", "#52CC95", "#F0756A", "#FFB454"
