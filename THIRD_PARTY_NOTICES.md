@@ -1,6 +1,6 @@
 # Third-party notices
 
-murmur's own license is not stated here. This file lists what else ships with, or is downloaded by, murmur. Versions are the exact pins in `requirements.txt` / `requirements-build.txt`; transitive versions are those resolved in the build environment (Python 3.14, Windows). License identifiers are SPDX, taken from each package's own metadata or the upstream repository's license; full texts are in each package's `*.dist-info` inside `_internal/` or at the upstream URL.
+murmur itself is licensed under Apache-2.0 (see `LICENSE`). This file lists what else ships with, or is downloaded by, murmur. Versions are the exact pins in `requirements.txt` / `requirements-build.txt`; transitive versions are those resolved in the build environment (Python 3.14, Windows). License identifiers are SPDX, taken from each package's own metadata or the upstream repository's license; full texts are in each package's `*.dist-info` inside `_internal/` or at the upstream URL.
 
 ## 1. Python packages in the build
 

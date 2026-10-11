@@ -108,3 +108,6 @@ Set `[llm] provider = "builtin"` (or use it as `[llm_fallback]`). murmur then ru
 
 ## Evaluating changes
 `python -m evals.run --cases core --no-llm` (deterministic scratch/fit/intent/guard cases, any OS) is the regression check for brain.py logic; `--n 3 --label X` on the Windows venv runs the LLM cases against LM Studio, and `python -m evals.compare A.json B.json` shows regressions. Cases live in `evals/cases/core.jsonl`; `evals/cases/local/` (built from your history by `python -m evals.build`) and `evals/results/` are gitignored. Details: `evals/README.md`.
+
+## License
+Apache-2.0, see `LICENSE`. Third-party components and their licenses: `THIRD_PARTY_NOTICES.md`.
