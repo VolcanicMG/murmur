@@ -44,6 +44,8 @@ echo "build time: $(( $(date +%s) - start ))s"
 OUT="$BUILD_DIR/dist/murmur"
 [[ -f "$OUT/murmur.exe" && -d "$OUT/_internal" ]] || { echo "ERROR: build produced no onedir app at $OUT"; exit 1; }
 
+cp "$REPO/THIRD_PARTY_NOTICES.md" "$OUT/"  # next to murmur.exe
+
 echo "[3/4] Installing to $INSTALL_DIR (clean replace; user data lives in ~/.murmur, never here) ..."
 mkdir -p "$INSTALL_DIR"
 find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
