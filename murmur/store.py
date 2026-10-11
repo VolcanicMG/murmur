@@ -100,7 +100,7 @@ roots = []  # extra workspace folders to index for file tags
 [audio]
 device = ""  # input device name; "" = system default (pick one in Settings > Config)
 preroll_ms = 0  # 0 = mic opened once and started on key-down (no "in use" indicator between dictations); > 0 = keep it running and include this much audio from before the key
-keep_recordings = 0  # save the last N recordings (+ raw transcript) to ~/.murmur/recordings for model comparisons; 0 = off
+keep_recordings = 0  # dev only (needs MURMUR_DEV=1): save the last N recordings (+ raw transcript) to ~/.murmur/recordings; 0 = off
 
 [output]
 method = "paste"  # or "type" for apps that block paste
@@ -151,11 +151,16 @@ def tail_s(cfg):
     return max(0, int(cfg.get("dictation", {}).get("tail_ms", 350))) / 1000
 
 
+def dev(env=None):
+    """True when MURMUR_DEV=1: the tuning tools (kept recordings) are available. Unset on a shipped install, so no audio is saved."""
+    return (os.environ if env is None else env).get("MURMUR_DEV") == "1"
+
+
 def keep_take(cfg, frames, raw, hold_s):
-    """[audio] keep_recordings > 0: save a take's audio blocks (+ raw transcript) for evals/model comparisons. Never in private
-    mode (the caller already skips sensitive fields); never raises."""
+    """MURMUR_DEV=1 and [audio] keep_recordings > 0: save a take's audio blocks (+ raw transcript) for evals/model comparisons.
+    Never in private mode (the caller already skips sensitive fields); never raises."""
     keep = cfg.get("audio", {}).get("keep_recordings", 0)
-    if not keep or is_private(cfg) or not frames:
+    if not keep or not dev() or is_private(cfg) or not frames:
         return
     import logging
     log = logging.getLogger("murmur")

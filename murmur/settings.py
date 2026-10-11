@@ -646,12 +646,14 @@ def _dictation_card(B):
     _number_row(B, g, "dictation.silence_ms", "Stop after silence (ms)")
     _number_row(B, g, "audio.preroll_ms", "Pre-roll before the key (ms)"); _hint(B, g, "> 0 keeps the mic running (shows as in use); 0 = warm, started on key-down", _num_w(B))
     _number_row(B, g, "dictation.tail_ms", "Tail after release (ms)")
-    _number_row(B, g, "audio.keep_recordings", "Keep last recordings"); _hint(B, g, "~/.murmur/recordings, for model comparisons; 0 = off", _num_w(B))
+    if store.dev():
+        _number_row(B, g, "audio.keep_recordings", "Keep last recordings"); _hint(B, g, "~/.murmur/recordings, for model comparisons; 0 = off", _num_w(B))
 
     def clear_recordings():
         n = store.clear_recordings()
         B.status.set(f"Deleted {n} recording{'s' * (n != 1)}.", "success")
-    _row(B, g, None, "Saved recordings", _armed_pill(g, ui, "Delete all recordings", "Click again to delete every recording", clear_recordings))
+    if store.dev() or any((store.HOME / "recordings").glob("*.wav")):  # leftovers from a dev run stay deletable
+        _row(B, g, None, "Saved recordings", _armed_pill(g, ui, "Delete all recordings", "Click again to delete every recording", clear_recordings))
     _toggle_row(B, g, "ui.sounds", "Sounds")
     lab, _ = _toggle_row(B, g, "ui.start_sound", "Start sound")
     lab.config(padx=k(14)); _label(g, ui, "Plays when recording begins", "small", SECONDARY, FIELD).grid(row=g.grid_size()[1] - 1, column=1, sticky="w", padx=(k(60), 0))

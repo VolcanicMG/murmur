@@ -236,6 +236,21 @@ class Mic(unittest.TestCase):
         self.assertEqual([f[0] for f in got], [6, 7, 8, 9])  # 400 ms = the last four frames
         self.assertEqual(r.take(), [])  # emptied
 
+    def test_keep_take_needs_dev_env(self):
+        import os, tempfile
+        from unittest import mock
+        np = _numpy_or_skip(self)
+        from murmur import store
+        self.addCleanup(setattr, store, "HOME", store.HOME)
+        store.HOME = Path(tempfile.mkdtemp())
+        cfg, frames = {"audio": {"keep_recordings": 5}}, [np.zeros((1600, 1), np.float32)]
+        with mock.patch.dict(os.environ, {"MURMUR_DEV": ""}):
+            store.keep_take(cfg, frames, "raw", 1.0)
+        self.assertFalse((store.HOME / "recordings").exists())  # a shipped install never saves audio
+        with mock.patch.dict(os.environ, {"MURMUR_DEV": "1"}):
+            store.keep_take(cfg, frames, "raw", 1.0)
+        self.assertEqual(len(list((store.HOME / "recordings").glob("*.wav"))), 1)
+
     def test_save_recording_prunes(self):
         import tempfile
         np = _numpy_or_skip(self)
