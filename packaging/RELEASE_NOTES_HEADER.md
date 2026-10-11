@@ -18,7 +18,7 @@ Compare the checksum against `SHA256SUMS.txt` (PowerShell):
 Get-Content .\SHA256SUMS.txt
 ```
 
-The two hashes must match. To also confirm the zip was built by this repository's release workflow (needs the [GitHub CLI](https://cli.github.com)):
+The two hashes must match. While this repository is public, releases also carry a build attestation, which confirms the zip was built by its release workflow (needs the [GitHub CLI](https://cli.github.com)):
 
 ```powershell
 gh attestation verify .\murmur-windows.zip --repo @REPO@

@@ -297,7 +297,9 @@ class HotkeyValidation(unittest.TestCase):
 class ConfigAutosave(unittest.TestCase):
     def test_saves_changes_once_and_waits_for_text_fields(self):
         from types import SimpleNamespace
-        from murmur import settings
+        stubs = {m: mock.MagicMock() for m in ("keyboard", "pyperclip", "win32api", "win32gui", "win32process")}
+        with mock.patch.dict(sys.modules, stubs):  # settings imports the Windows glue; CI runs this on Linux
+            from murmur import settings
         st, saves = SimpleNamespace(saved="a"), []
         tick = lambda now, editing=False: settings.autosave_tick(st, now, editing, lambda: saves.append(now))
         tick("a")  # unchanged
