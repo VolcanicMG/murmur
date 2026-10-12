@@ -12,7 +12,7 @@ Refuses to run (exit 1, clear message) while `murmur.exe` is running. Otherwise 
 ```powershell
 .\packaging\build.ps1 [-Python python] [-Dist dist]
 ```
-Same PyInstaller invocation without the WSL staging; `.github/workflows/release.yml` calls it, zips `dist/murmur`, writes `SHA256SUMS.txt`, attests the zip (public repos only) and attaches both to the release for `v*` tags, with `RELEASE_NOTES_HEADER.md` (`@REPO@` is substituted) ahead of the generated notes. `THIRD_PARTY_NOTICES.md` is copied next to `murmur.exe`.
+Same PyInstaller invocation without the WSL staging; `.github/workflows/release.yml` calls it, zips `dist/murmur`, compiles `packaging/murmur.iss` into `murmur-setup.exe` with the runner's Inno Setup (`ISCC /DAppVersion=<__version__>`; per-machine install into Program Files, never change its `AppId`), writes `SHA256SUMS.txt` for both, attests them (public repos only) and attaches all three to the release for `v*` tags, with `RELEASE_NOTES_HEADER.md` (`@REPO@` is substituted) ahead of the generated notes. `THIRD_PARTY_NOTICES.md` is copied next to `murmur.exe`.
 
 The only build-time dependency is pinned in `requirements-build.txt` at the repo root (`pip install -r requirements-build.txt`; PyInstaller 6.22.3).
 

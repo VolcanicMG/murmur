@@ -46,7 +46,7 @@ Transitive packages pulled in by the above (installed in the build venv; PyInsta
 | tqdm | 4.70.1 | MPL-2.0 AND MIT | https://tqdm.github.io |
 | typing_extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 
-Build tooling that is not shipped in the app but whose bootloader is: PyInstaller 6.22.3, GPL-2.0-or-later with a special exception that allows the apps it builds to be distributed under any terms (https://pyinstaller.org). Its build-only helpers (altgraph, pefile, pywin32-ctypes, pyinstaller-hooks-contrib) are not included in the app.
+The installer (`murmur-setup.exe`) is built with Inno Setup 6 (Inno Setup License, https://jrsoftware.org/isinfo.php), whose setup and uninstall programs are part of that file. Build tooling that is not shipped in the app but whose bootloader is: PyInstaller 6.22.3, GPL-2.0-or-later with a special exception that allows the apps it builds to be distributed under any terms (https://pyinstaller.org). Its build-only helpers (altgraph, pefile, pywin32-ctypes, pyinstaller-hooks-contrib) are not included in the app.
 
 Also in the build folder: the CPython 3.14 runtime and standard library (PSF-2.0, https://www.python.org), Tcl/Tk 8.6 (Tcl/Tk license, BSD-style, https://www.tcl-lang.org), OpenSSL 3 (Apache-2.0, https://www.openssl.org), and the Microsoft Visual C++ runtime DLLs (redistributable under Microsoft's VC++ redistribution terms).
 

@@ -1,4 +1,4 @@
-# Windows onedir build: manual (workflow_dispatch) or on a v* tag. Windows runners bill 2x: this is not run on every push.
+# Windows onedir build + installer: manual (workflow_dispatch) or on a v* tag. Windows runners bill 2x: this is not run on every push.
 name: release
 on:
   workflow_dispatch:
@@ -28,17 +28,25 @@ jobs:
       - run: python -m unittest discover tests
       - run: ./packaging/build.ps1 -Python python
       - run: Compress-Archive -Path dist/murmur -DestinationPath murmur-windows.zip
+      - run: |  # Inno Setup ships on the runner image; the installer wraps the same dist/murmur folder
+          $v = python -c "import murmur; print(murmur.__version__)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\murmur.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          Move-Item dist\murmur-setup.exe murmur-setup.exe
       - run: |
-          $h = (Get-FileHash murmur-windows.zip -Algorithm SHA256).Hash.ToLower()
-          [IO.File]::WriteAllText("SHA256SUMS.txt", "$h  murmur-windows.zip`n")
+          $lines = "murmur-setup.exe", "murmur-windows.zip" | ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $_" }
+          [IO.File]::WriteAllText("SHA256SUMS.txt", ($lines -join "`n") + "`n")
       - if: ${{ !github.event.repository.private }}  # attestations need a public repo (or Enterprise)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: murmur-windows.zip
+          subject-path: |
+            murmur-setup.exe
+            murmur-windows.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: murmur-windows
           path: |
+            murmur-setup.exe
             murmur-windows.zip
             SHA256SUMS.txt
           if-no-files-found: error
@@ -64,4 +72,4 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           sed "s|@REPO@|$GITHUB_REPOSITORY|g" packaging/RELEASE_NOTES_HEADER.md > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" murmur-windows.zip SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          gh release create "$TAG" murmur-setup.exe murmur-windows.zip SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

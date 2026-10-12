@@ -350,16 +350,17 @@ footer a { text-decoration: none; color: var(--name); }
 <section id="install" class="center">
   <div class="wrap">
     <span class="chip"><i></i>Install</span>
-    <h2>Three steps, <b>no installer.</b></h2>
+    <h2>Three steps, <b>about a minute.</b></h2>
     <div class="steps">
-      <div class="tile"><small>Step 1</small><strong>Download the zip</strong><p>Get <code>murmur-windows.zip</code> from the latest release on GitHub.</p></div>
-      <div class="tile"><small>Step 2</small><strong>Unzip it anywhere</strong><p>About 780 MB once unpacked. The speech model is already inside.</p></div>
-      <div class="tile"><small>Step 3</small><strong>Run murmur.exe</strong><p>A one-minute setup picks your microphone, cleanup model and keys.</p></div>
+      <div class="tile"><small>Step 1</small><strong>Download the installer</strong><p>Get <code>murmur-setup.exe</code> from the latest release on GitHub. The speech model is inside.</p></div>
+      <div class="tile"><small>Step 2</small><strong>Run it</strong><p>Windows asks for permission, then murmur lands in Program Files with a Start menu entry.</p></div>
+      <div class="tile"><small>Step 3</small><strong>Start murmur</strong><p>A one-minute setup picks your microphone, cleanup model and keys.</p></div>
     </div>
     <div class="panel warn-box">
       <span class="chip warn"><i></i>Heads up</span>
-      <p><b>Windows will warn you the first time.</b> murmur is not code-signed yet, so Windows shows “Windows protected your PC”. Choose <b>More info</b>, then <b>Run anyway</b>. Every release lists a SHA-256 checksum so you can check the download is the one we built. The cleanup model is a separate download of about 6 GB that you start yourself.</p>
+      <p><b>Windows will warn you the first time.</b> murmur is not code-signed yet, so Windows shows “Windows protected your PC”. Choose <b>More info</b>, then <b>Run anyway</b>. Every release lists a SHA-256 checksum so you can check the download is the one we built. The cleanup model is a separate download of about 6 GB that murmur offers on first start.</p>
     </div>
+    <p class="fine">Updating is the same three steps: run the new installer over the old one and your settings are kept. A portable zip is on the release page too.</p>
   </div>
 </section>
 

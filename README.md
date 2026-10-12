@@ -3,9 +3,13 @@
 Local voice dictation for Windows: hold a key, talk, and cleaned text is pasted into the active app. Parakeet (ONNX, CPU) transcribes; a bundled llama.cpp runtime cleans the text up. Nothing leaves the machine unless you enable a remote provider.
 
 ## Install
-Download `murmur-windows.zip` from [Releases](../../releases), unzip it (keep the `murmur` folder together) and run `murmur\murmur.exe`. The first launch opens a short setup (microphone, cleanup model, hotkeys); there is no autostart.
+Download `murmur-setup.exe` from [Releases](../../releases) and run it. It installs into Program Files (Windows asks for permission), adds a Start menu entry and an uninstaller, and can optionally add a desktop shortcut and start murmur when you sign in. The first launch opens a short setup (microphone, cleanup model, hotkeys).
 
-The build is **not code-signed** (no certificate), so Windows SmartScreen shows "Windows protected your PC" the first time: click **More info**, then **Run anyway**. To check the download, compare `(Get-FileHash .\murmur-windows.zip -Algorithm SHA256).Hash` with `SHA256SUMS.txt` from the same release; where available, `gh attestation verify .\murmur-windows.zip --repo VolcanicMG/murmur` proves it was built by this repo's release workflow. Third-party licenses are in `THIRD_PARTY_NOTICES.md` (also shipped next to `murmur.exe`).
+**Updating:** run the new `murmur-setup.exe` over the old install; quit murmur from the tray when setup asks. Settings, history and models live in `%USERPROFILE%\.murmur` and are kept. Uninstalling leaves that folder too: delete it by hand to remove everything, including the downloaded model.
+
+**Portable:** `murmur-windows.zip` from the same release is the app without an installer: unzip it (keep the `murmur` folder together) and run `murmur\murmur.exe`.
+
+Neither file is **code-signed** (no certificate), so Windows SmartScreen shows "Windows protected your PC" the first time: click **More info**, then **Run anyway**. To check a download, compare `(Get-FileHash .\murmur-setup.exe -Algorithm SHA256).Hash` with its line in `SHA256SUMS.txt` from the same release; where available, `gh attestation verify .\murmur-setup.exe --repo VolcanicMG/murmur` proves it was built by this repo's release workflow. Third-party licenses are in `THIRD_PARTY_NOTICES.md` (also next to `murmur.exe`).
 
 ### Build from source
 Run the installer build (`./packaging/build.sh` from WSL; see `packaging/README.md`): murmur lands in `%LOCALAPPDATA%\Programs\murmur` as a folder with `murmur.exe`, plus a Desktop shortcut `murmur.lnk`. The first launch opens a short setup (microphone, cleanup model, hotkeys); run it again any time from the tray (About > Run setup again) or `murmur --setup`. There is no autostart.
