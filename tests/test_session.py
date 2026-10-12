@@ -259,6 +259,14 @@ class Adapt(unittest.TestCase):  # Track B wiring
         s._show_outcome("x")
         self.assertIsNone(ov.state.call_args.kwargs.get("label"))
 
+    def test_no_cleanup_model_says_where_to_get_it(self):
+        s, ov = make(self.session)
+        s.degraded = True
+        with mock.patch.object(self.session.builtin, "needs_model", return_value=True):
+            s._show_outcome("x")
+        self.assertEqual(ov.state.call_args.kwargs.get("label"), "No cleanup model")
+        self.assertIn("Settings", ov.state.call_args.args[1])
+
 
 class Commit(unittest.TestCase):
     def test_forced_cut_in_a_room_that_never_goes_quiet(self):  # D7

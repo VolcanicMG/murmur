@@ -4,7 +4,7 @@ import keyboard
 from datetime import datetime
 import numpy as np
 import sounddevice as sd
-from . import audio, mic, autolearn, brain, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
+from . import audio, mic, autolearn, brain, builtin, capture, context, cues, llm, phonetic, speech, store, stt, win, workspace
 
 log = logging.getLogger("murmur")
 UNDO_WINDOW = 60  # seconds after our last paste during which "scratch that" sends ctrl+z
@@ -600,7 +600,10 @@ class Session:
             self.ov.state("pasted", "Typed into a password field \u00b7 not saved" if self.password else "Typed \u00b7 not saved")
         elif self.degraded:
             starting = store.runtime.get("llm_starting")  # the bundled model was still coming up when this dictation finished
-            self.ov.state("offline", label="Model starting\u2026" if starting else None)
+            if not starting and builtin.needs_model(self.cfg):
+                self.ov.state("offline", "No cleanup model yet. Download it in Settings \u203a Config.", label="No cleanup model")
+            else:
+                self.ov.state("offline", label="Model starting\u2026" if starting else None)
         elif self.kept_raw:
             self.ov.state("offline", "Kept your words; cleanup looked wrong.", label="Kept raw")
         elif self.mode == "command":

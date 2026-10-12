@@ -138,7 +138,15 @@ def _page_model(body, ui, ctx):
     opts = ["builtin", "lmstudio"] if BUILTIN_MODEL else ["lmstudio"]
     choice = Select(body, ui, opts).labelled({"builtin": "Built-in model (recommended)", "lmstudio": "Use LM Studio instead"})
     choice.pack(anchor="w", pady=(0, ui.k(16)))
-    bi = builtin.build(body, ui, store.merged_config)
+    bi = tk.Frame(body, bg=body.cget("bg"))
+    lead = _label(bi, ui, "", "section", ERROR); lead.config(wraplength=ui.k(480), justify="left")  # shown only while no model exists
+    panel = None
+
+    def follow(have):
+        lead.config(text="" if have else "You need a cleanup model. Without one murmur pastes your words exactly as heard.")
+        lead.pack_forget() if have else lead.pack(anchor="w", **({"before": panel} if panel is not None and panel.winfo_manager() else {}))
+    panel = builtin.build(bi, ui, store.merged_config, follow)
+    panel.pack(anchor="w", pady=(ui.k(8), 0))
     lm = tk.Frame(body, bg=body.cget("bg"))
     head = _label(lm, ui, "Checking LM Studio\u2026", "section", TEXT)
     head.pack(anchor="w")
@@ -155,7 +163,7 @@ def _page_model(body, ui, ctx):
     show()
 
     def enter():
-        bi.refresh()
+        panel.refresh()
         threading.Thread(target=lambda: box.append(lm_status(store.merged_config())), daemon=True).start()
         poll()
 

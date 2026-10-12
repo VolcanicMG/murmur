@@ -64,7 +64,7 @@ Fetched only on first use or when the user clicks the button; never shipped in t
 | Component | Version | License | Upstream |
 |---|---|---|---|
 | llama.cpp runtime (`llama-server`, Vulkan/CUDA/CPU Windows builds, SHA-256 pinned in `murmur/localllm.py`) | b11456 | MIT | https://github.com/ggml-org/llama.cpp |
-| Gemma 4 E4B instruction model, GGUF Q6_K (`lmstudio-community/gemma-4-E4B-it-GGUF`) | Q6_K | Apache-2.0 (per the Hugging Face model card) | https://huggingface.co/google/gemma-4-E4B-it, https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF |
+| Gemma 4 E4B instruction model, GGUF Q6_K (`lmstudio-community/gemma-4-E4B-it-GGUF`) | Q6_K, Hugging Face revision 99210a71094c (pinned, SHA-256 checked) | Apache-2.0 (per the Hugging Face model card) | https://huggingface.co/google/gemma-4-E4B-it, https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF |
 
 ## 4. Website fonts (`docs/fonts`, GitHub Pages site only; not in the app)
 

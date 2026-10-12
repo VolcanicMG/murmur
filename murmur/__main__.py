@@ -29,17 +29,10 @@ def _builtin_wanted(cfg):
 
 
 def start_builtin(cfg):
-    """Launch the bundled llama-server and send ONE throwaway chat so a first-install shader compile (~12 s on Vulkan) isn't
-    paid by the first dictation. Runs on a daemon thread; failures are logged, the fallback path covers a dictation meanwhile."""
-    store.runtime["llm_starting"] = True
-    try:
-        from . import localllm
-        t = time.time(); localllm.start(cfg); log.info("bundled model up in %.1fs", time.time() - t)
-        t = time.time(); brain._chat(cfg, "Reply with one word.", "ping"); log.info("bundled model warm-up %.1fs", time.time() - t)
-    except Exception as e:
-        log.info("bundled model start failed: %s", e)
-    finally:
-        store.runtime["llm_starting"] = False
+    """Launch the bundled llama-server and warm it (see builtin.warm_up). Runs on a daemon thread; failures are logged, the fallback
+    path covers a dictation meanwhile."""
+    from . import builtin, localllm
+    builtin.warm_up(cfg, localllm)
 
 
 def start_lm_studio(cfg):
@@ -139,7 +132,15 @@ def learn(cfg):
     print(text)
 
 
+def ensure_std_streams():
+    """A windowed frozen exe has sys.stdout/stderr = None and libraries (tqdm, logging, print) write to them: point them at devnull."""
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+
+
 def main():
+    ensure_std_streams()
     if os.name == "nt":
         from . import win
         win.dpi_aware()  # before any window exists

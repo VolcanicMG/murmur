@@ -151,9 +151,9 @@ class T(unittest.TestCase):
         with mock.patch.object(store, "find_lms", return_value=None):
             self.assertEqual(m.lms_command({"lms": "", "lms_load": "", "model": "m"}), (None, []))
 
-    def test_new_config_defaults_to_the_bundled_model_with_lm_studio_fallback(self):
+    def test_new_config_defaults_to_the_bundled_model_with_the_fallback_off(self):
         cfg = tomllib.loads(store.DEFAULT_CONFIG)
-        self.assertEqual((cfg["llm"]["provider"], cfg["llm"]["fallback"]), ("builtin", True))
+        self.assertEqual((cfg["llm"]["provider"], cfg["llm"]["fallback"]), ("builtin", False))
         self.assertEqual((cfg["llm_fallback"]["provider"], cfg["llm_fallback"]["url"], cfg["llm_fallback"]["model"]),
                          ("openai", "http://localhost:1234/v1/chat/completions", "google/gemma-4-e4b"))
         self.assertEqual(cfg["builtin"], {"enabled": True, "backend": "vulkan", "model": "", "gpu_layers": -1, "ctx": 8192, "port": 0})
@@ -167,7 +167,7 @@ class T(unittest.TestCase):
         kept = store.form_to_cfg({}, old)
         self.assertEqual((kept["llm"]["provider"], kept["llm"]["fallback"]), ("openai", False))
         fresh = store.merged_config(tomllib.loads(store.DEFAULT_CONFIG))  # a new file spells the keys out: new defaults
-        self.assertEqual((fresh["llm"]["provider"], fresh["llm"]["fallback"], fresh["builtin"]["enabled"]), ("builtin", True, True))
+        self.assertEqual((fresh["llm"]["provider"], fresh["llm"]["fallback"], fresh["builtin"]["enabled"]), ("builtin", False, True))
         self.assertEqual(store.merged_config({"llm": {"provider": "builtin"}})["llm"]["provider"], "builtin")  # explicit wins
 
     def test_builtin_int_keys_and_url_check(self):

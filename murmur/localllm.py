@@ -1,6 +1,6 @@
 """Bundled LLM: a managed llama.cpp `llama-server` child process (OpenAI-compatible, localhost only).
 The runtime zip(s) are fetched on demand to ~/.murmur/runtime (SHA-256 pinned below); the model is never downloaded implicitly."""
-import atexit, ctypes, glob, hashlib, logging, os, shutil, socket, subprocess, threading, time, urllib.request, zipfile
+import atexit, ctypes, errno, glob, hashlib, http.client, logging, os, re, shutil, socket, subprocess, threading, time, urllib.error, urllib.request, zipfile
 from ctypes import wintypes
 from pathlib import Path
 
@@ -17,6 +17,12 @@ ASSETS = {
              ("cudart-llama-bin-win-cuda-13.4-x64.zip", "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668")],
 }
 MODEL_REPO, MODEL_FILE = "lmstudio-community/gemma-4-E4B-it-GGUF", "gemma-4-E4B-it-Q6_K.gguf"  # Apache-2.0, not gated
+# pinned like ASSETS: bumping the model = update all three (HF API: /api/models/{MODEL_REPO}/tree/main shows size and lfs.oid)
+MODEL_REV = "99210a71094c6aa8559f764e0cadedd7d89de94d"
+MODEL_SIZE = 6217260864
+MODEL_SHA256 = "17f0e51b02f755f85c5e5c865dd44f86306cccaa2acfa2ef4a90456acf526c54"
+MODEL_URL = f"https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REV}/{MODEL_FILE}"
+DISK_MARGIN = 500 * 1000 * 1000  # free space kept beyond the file itself
 DEFAULTS = {"enabled": True, "backend": "vulkan", "model": "", "gpu_layers": -1, "ctx": 8192, "port": 0, "start_timeout": 120}
 EXE = "llama-server.exe"
 
@@ -111,22 +117,113 @@ def find_model(cfg):
     return Path(lm[0]) if lm else None
 
 
-def download_model(cfg, progress_cb=None):
-    """Fetch the pinned GGUF (about 6 GB) into ~/.murmur/models via huggingface_hub; call ONLY on explicit user action.
-    progress_cb(done_bytes, total_bytes). Returns the local path."""
-    from huggingface_hub import hf_hub_download
-    from tqdm.auto import tqdm
+class Cancelled(Exception):
+    """The user cancelled the model download; the .part file is kept so it can resume."""
 
-    class Bar(tqdm):
-        def update(self, n=1):
-            r = super().update(n)
-            if progress_cb and self.total:
-                progress_cb(int(self.n), int(self.total))
-            return r
 
-    d = store.HOME / "models"
+class DownloadError(RuntimeError):
+    """A model download failure whose str() is fit to show a person."""
+
+
+def models_dir():
+    return store.HOME / "models"
+
+
+def part_path():
+    """The resumable partial download (find_model only globs *.gguf, so it never mistakes this for a model)."""
+    return models_dir() / (MODEL_FILE + ".part")
+
+
+def part_bytes():
+    """Bytes already downloaded into the .part file (0 if none)."""
+    try:
+        return part_path().stat().st_size
+    except OSError:
+        return 0
+
+
+def _hash_part(path, cancel):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+    return h
+
+
+def _drive(path):
+    return Path(path).drive or str(Path(path).anchor) or str(path)
+
+
+def _open_model(opener, have):
+    """Open MODEL_URL (resuming at `have` bytes when > 0); readable DownloadError on failure. Returns the response."""
+    req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "murmur", **({"Range": f"bytes={have}-"} if have else {})})
+    try:
+        return opener(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code == 416:
+            return None  # the part is not a prefix of this file: caller restarts clean
+        raise DownloadError(f"Hugging Face answered {e.code}") from e
+    except (urllib.error.URLError, OSError) as e:
+        log.info("model download: could not reach %s: %s", MODEL_URL, e)  # DNS, TLS, proxy or no network at all
+        raise DownloadError("Couldn't reach huggingface.co. Check your internet connection.") from e
+
+
+def download_model(cfg, progress_cb=None, cancel=None, opener=urllib.request.urlopen, disk_usage=shutil.disk_usage):
+    """Fetch the pinned GGUF (about 6 GB) into ~/.murmur/models with stdlib urllib; call ONLY on explicit user action.
+    Resumes ~/.murmur/models/<file>.part with a Range request (a server that answers 200, or a part that is not a prefix, restarts
+    clean), reports progress_cb(done_bytes, total_bytes) at most ~5x/s (first call right away with the resumed size), stops with
+    Cancelled when the `cancel` threading.Event is set (the part is kept), checks free disk space first, verifies the whole file's
+    SHA-256 (a mismatch deletes the part), then renames it into place. DownloadError messages are readable. Returns the final path."""
+    d = models_dir()
     d.mkdir(parents=True, exist_ok=True)
-    return Path(hf_hub_download(MODEL_REPO, MODEL_FILE, local_dir=d, tqdm_class=Bar))
+    final, part = d / MODEL_FILE, part_path()
+    if final.is_file() and final.stat().st_size == MODEL_SIZE:
+        return final
+    have = part_bytes()
+    if have > MODEL_SIZE:
+        part.unlink(); have = 0
+    need, free = MODEL_SIZE - have + DISK_MARGIN, disk_usage(d).free
+    if free < need:
+        raise DownloadError(f"Not enough disk space on {_drive(d)} (need {need / 1e9:.1f} GB, {free / 1e9:.1f} GB free)")
+    cancelled = lambda: cancel is not None and cancel.is_set()
+    if progress_cb:
+        progress_cb(have, MODEL_SIZE)
+    h = _hash_part(part, cancel) if have else hashlib.sha256()
+    done, last = have, time.monotonic()
+    if done < MODEL_SIZE:
+        r = _open_model(opener, have)
+        if r is None:  # 416
+            part.unlink(missing_ok=True); have, h, done = 0, hashlib.sha256(), 0
+            r = _open_model(opener, 0)
+        with r:
+            m = re.match(r"bytes (\d+)-", r.headers.get("Content-Range") or "")
+            if have and not (getattr(r, "status", 200) == 206 and m and int(m.group(1)) == have):  # 200 or a different offset: start over
+                have, h, done = 0, hashlib.sha256(), 0
+            try:
+                with open(part, "ab" if have else "wb") as f:
+                    while chunk := r.read(1 << 18):
+                        if cancelled():
+                            raise Cancelled()
+                        f.write(chunk); h.update(chunk); done += len(chunk)
+                        if progress_cb and time.monotonic() - last >= 0.2:
+                            progress_cb(done, MODEL_SIZE); last = time.monotonic()
+                    if cancelled():
+                        raise Cancelled()
+            except (OSError, http.client.HTTPException) as e:
+                if getattr(e, "errno", None) == errno.ENOSPC:
+                    raise DownloadError(f"Ran out of disk space on {_drive(d)}") from e
+                raise DownloadError("The connection was interrupted. Try again to resume.") from e
+    if progress_cb:
+        progress_cb(done, MODEL_SIZE)
+    if done != MODEL_SIZE:
+        raise DownloadError("The download ended early. Try again to resume.")
+    if h.hexdigest() != MODEL_SHA256:
+        part.unlink(missing_ok=True)
+        raise DownloadError("The download was corrupted, try again")
+    os.replace(part, final)
+    return final
 
 
 def _free_port():
@@ -200,9 +297,10 @@ def _spawn(cfg):
     """Launch the server and wait for /health. Raises (after killing the child) on exit or timeout."""
     global _proc, _url
     c = _cfg(cfg)
-    exe, model = ensure_binary(cfg), find_model(cfg)
-    if not model:
+    model = find_model(cfg)
+    if not model:  # checked first: don't fetch the 90 MB runtime for a server that cannot start
         raise RuntimeError("no model found: set [builtin] model, or download one (Settings) into ~/.murmur/models")
+    exe = ensure_binary(cfg)
     port = int(c["port"]) or _free_port()
     ngl = "all" if int(c["gpu_layers"]) < 0 else str(int(c["gpu_layers"]))
     cmd = [str(exe), "--model", str(model), "--host", "127.0.0.1", "--port", str(port), "-ngl", ngl,

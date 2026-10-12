@@ -2,7 +2,7 @@
 import logging, os, sys, threading, time
 from types import SimpleNamespace
 import keyboard, pystray
-from . import brain, capture, card, context, cues, settings, store, win
+from . import brain, builtin, capture, card, context, cues, settings, store, win
 from .session import Session
 from . import tray
 from .tray import TOOLTIPS, tray_image
@@ -402,6 +402,13 @@ def tray_app(cfg, learn, boot, first_run=False):
             ov.post(lambda: setup.open_setup(ov.root))
         except ImportError:
             pass
+    if builtin.should_prompt(cfg, store.load_state(), first_run):  # nothing cleans up your dictations yet: offer the download once per launch
+        def offer():
+            if ov.recording:
+                ov.root.after(5000, offer)
+                return
+            builtin.open_download(None, settings.make_ui(), lambda: cfg, auto=True)
+        ov.post(offer)
 
     def start():
         try:

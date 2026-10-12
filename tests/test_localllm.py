@@ -1,7 +1,8 @@
-import hashlib, io, sys, tempfile, threading, time, unittest, zipfile
+import errno, hashlib, io, sys, tempfile, threading, time, unittest, zipfile
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import urllib.error
 from murmur import llm, localllm, store
 
 
@@ -78,6 +79,151 @@ class Model(Base):
     def test_none_when_absent(self):
         with mock.patch.object(Path, "home", return_value=self.home):
             self.assertIsNone(localllm.find_model({}))
+
+
+DATA = bytes(range(256)) * 400  # 102,400 bytes standing in for the GGUF
+
+
+class FakeResp:
+    def __init__(self, body, status=200, start=None):
+        self.body, self.status, self.fp = body, status, io.BytesIO(body)
+        self.headers = {"Content-Range": f"bytes {start}-{start + len(body) - 1}/{len(DATA)}"} if start is not None else {}
+
+    def read(self, n=-1):
+        return self.fp.read(10000 if n < 0 else min(n, 10000))  # short reads like a socket
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class Download(Base):
+    def setUp(self):
+        super().setUp()
+        for name, val in (("MODEL_SIZE", len(DATA)), ("MODEL_SHA256", hashlib.sha256(DATA).hexdigest())):
+            p = mock.patch.object(localllm, name, val); p.start(); self.addCleanup(p.stop)
+        self.reqs = []
+        self.free = lambda p: mock.Mock(free=10**12)
+
+    def opener(self, honour_range=True, fail=None, data=DATA):
+        def op(req, timeout=None):
+            self.reqs.append(req.get_header("Range"))
+            if fail:
+                raise fail
+            rng = req.get_header("Range")
+            if rng and honour_range:
+                start = int(rng.split("=")[1].rstrip("-"))
+                return FakeResp(data[start:], 206, start)
+            return FakeResp(data)
+        return op
+
+    def run_dl(self, **kw):
+        kw.setdefault("opener", self.opener()); kw.setdefault("disk_usage", self.free)
+        return localllm.download_model({}, **kw)
+
+    def test_fresh_download_verifies_and_renames_atomically(self):
+        seen = []
+        out = self.run_dl(progress_cb=lambda d, t: seen.append((d, t)))
+        self.assertEqual(out, self.home / "models" / localllm.MODEL_FILE)
+        self.assertEqual(out.read_bytes(), DATA)
+        self.assertFalse(localllm.part_path().exists())
+        self.assertEqual((seen[0], seen[-1]), ((0, len(DATA)), (len(DATA), len(DATA))))
+        self.assertEqual(self.reqs, [None])
+
+    def test_progress_is_throttled(self):
+        seen = []
+        self.run_dl(progress_cb=lambda d, t: seen.append(d))
+        self.assertLessEqual(len(seen), 4)  # first, (maybe one tick), last: nowhere near one call per chunk
+
+    def test_resumes_from_the_part_with_a_range_request(self):
+        localllm.part_path().parent.mkdir(parents=True); localllm.part_path().write_bytes(DATA[:30000])
+        seen = []
+        out = self.run_dl(progress_cb=lambda d, t: seen.append(d))
+        self.assertEqual(self.reqs, ["bytes=30000-"])
+        self.assertEqual(seen[0], 30000)
+        self.assertEqual(out.read_bytes(), DATA)
+
+    def test_server_answering_200_restarts_clean(self):
+        localllm.part_path().parent.mkdir(parents=True); localllm.part_path().write_bytes(b"junk" * 100)
+        out = self.run_dl(opener=self.opener(honour_range=False))
+        self.assertEqual(out.read_bytes(), DATA)
+
+    def test_416_restarts_clean_and_an_oversized_part_is_dropped(self):
+        localllm.part_path().parent.mkdir(parents=True); localllm.part_path().write_bytes(b"x" * (len(DATA) + 5))
+        self.assertEqual(self.run_dl().read_bytes(), DATA)
+        self.assertEqual(self.reqs, [None])
+        (self.home / "models" / localllm.MODEL_FILE).unlink(); localllm.part_path().write_bytes(b"x" * 10); self.reqs.clear()
+        calls = []
+
+        def op(req, timeout=None):
+            calls.append(req.get_header("Range"))
+            if req.get_header("Range"):
+                raise urllib.error.HTTPError(req.full_url, 416, "range", {}, None)
+            return FakeResp(DATA)
+        self.assertEqual(self.run_dl(opener=op).read_bytes(), DATA)
+        self.assertEqual(calls, ["bytes=10-", None])
+
+    def test_cancel_keeps_the_part_then_resumes(self):
+        ev = threading.Event()
+        n = []
+
+        def cb(d, t):
+            n.append(d)
+            if d > 0:
+                ev.set()
+        with mock.patch.object(localllm.time, "monotonic", side_effect=lambda c=iter(range(0, 10**6, 1)): next(c)):  # every chunk reports
+            with self.assertRaises(localllm.Cancelled):
+                self.run_dl(progress_cb=cb, cancel=ev)
+        got = localllm.part_bytes()
+        self.assertTrue(0 < got < len(DATA))
+        self.assertFalse((self.home / "models" / localllm.MODEL_FILE).exists())
+        self.reqs.clear()
+        self.assertEqual(self.run_dl().read_bytes(), DATA)
+        self.assertEqual(self.reqs, [f"bytes={got}-"])
+
+    def test_checksum_mismatch_deletes_the_part(self):
+        with self.assertRaisesRegex(localllm.DownloadError, "corrupted"):
+            self.run_dl(opener=self.opener(data=bytes(len(DATA))))
+        self.assertFalse(localllm.part_path().exists())
+        self.assertFalse((self.home / "models" / localllm.MODEL_FILE).exists())
+
+    def test_disk_space_refusal_names_the_drive_and_downloads_nothing(self):
+        with self.assertRaisesRegex(localllm.DownloadError, r"Not enough disk space on .*\(need [\d.]+ GB, 0\.1 GB free\)"):
+            self.run_dl(disk_usage=lambda p: mock.Mock(free=100_000_000))
+        self.assertEqual(self.reqs, [])
+
+    def test_readable_network_errors(self):
+        with self.assertRaisesRegex(localllm.DownloadError, "reach huggingface.co"):
+            self.run_dl(opener=self.opener(fail=urllib.error.URLError("dns")))
+        with self.assertRaisesRegex(localllm.DownloadError, "Hugging Face answered 503"):
+            self.run_dl(opener=self.opener(fail=urllib.error.HTTPError("u", 503, "x", {}, None)))
+
+    def test_a_truncated_stream_keeps_the_part_and_says_so(self):
+        with self.assertRaisesRegex(localllm.DownloadError, "ended early"):
+            self.run_dl(opener=self.opener(data=DATA[:5000]))
+        self.assertEqual(localllm.part_bytes(), 5000)
+
+    def test_a_complete_part_is_verified_and_renamed_without_a_request(self):
+        localllm.part_path().parent.mkdir(parents=True); localllm.part_path().write_bytes(DATA)
+        self.assertEqual(self.run_dl().read_bytes(), DATA)
+        self.assertEqual(self.reqs, [])
+
+    def test_disk_full_while_writing_is_readable(self):
+        class Boom(FakeResp):
+            def read(self, n=-1):
+                raise OSError(errno.ENOSPC, "No space left")
+        with self.assertRaisesRegex(localllm.DownloadError, "disk space"):
+            self.run_dl(opener=lambda req, timeout=None: Boom(DATA))
+
+    def test_find_model_ignores_part_files(self):
+        localllm.part_path().parent.mkdir(parents=True); localllm.part_path().write_bytes(b"x")
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertIsNone(localllm.find_model({}))
+
+    def test_pins_are_sane(self):
+        self.assertTrue(localllm.MODEL_URL.endswith(f"/resolve/{localllm.MODEL_REV}/{localllm.MODEL_FILE}"))
 
 
 class Process(Base):
@@ -216,6 +362,22 @@ class Switch(Base):
                 mock.patch.object(store, "find_lms", return_value=None):
             m.start_llm({"llm": {"provider": "builtin", "lms": "", "lms_load": "", "model": "m"}, "builtin": {"enabled": False}})
         th.assert_not_called()
+
+
+class Streams(unittest.TestCase):
+    def test_windowed_exe_without_std_streams_gets_devnull(self):
+        with mock.patch.dict(sys.modules, {n: mock.MagicMock() for n in ("numpy", "onnx_asr")}):
+            from murmur import __main__ as m
+        import logging
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None):
+            m.ensure_std_streams()
+            print("ok"); sys.stderr.write("x")  # would raise AttributeError on None
+            h = logging.StreamHandler(sys.stdout)
+            h.emit(logging.LogRecord("t", 20, "p", 1, "msg", None, None))
+            sys.stdout.close(); sys.stderr.close()
+        with mock.patch.object(sys, "stdout", io.StringIO()) as o:
+            m.ensure_std_streams()
+            self.assertIs(sys.stdout, o)  # a real stream is left alone
 
 
 class NonBlocking(Base):

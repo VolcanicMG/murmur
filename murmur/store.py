@@ -40,7 +40,7 @@ url = "http://localhost:1234/v1/chat/completions"
 model = "google/gemma-4-e4b"
 live_clean = true
 timeout = 15
-fallback = true  # on a primary failure, retry on [llm_fallback] (LM Studio by default; sends your text there)
+fallback = false  # on a primary failure, retry on [llm_fallback] (LM Studio by default; remote providers get your text). Off until you turn it on
 lms = ""  # path to LM Studio's lms CLI; "" = find it automatically (store.find_lms)
 lms_load = ""  # full load command; "" = load [llm] model with --gpu max -y --context-length 8192
 
