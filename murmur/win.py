@@ -144,6 +144,12 @@ def no_activate(root):
     win32gui.SetWindowLong(hwnd, -20, win32gui.GetWindowLong(hwnd, -20) | 0x08000000 | 0x80)
 
 
+def keep_on_top(hwnd):
+    """Put hwnd back at the top of the always-on-top band without activating it. -topmost is set once at startup; a window that
+    became always-on-top later (another app's "always on top", a game overlay) would otherwise stay above the card for good."""
+    win32gui.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200)  # HWND_TOPMOST; NOSIZE|NOMOVE|NOACTIVATE|NOOWNERZORDER
+
+
 def work_area(point):
     """(l, t, r, b) work area of the monitor containing point (None = primary)."""
     return win32api.GetMonitorInfo(win32api.MonitorFromPoint(point or (0, 0), 2))["Work"]

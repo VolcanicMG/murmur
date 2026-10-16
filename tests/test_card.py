@@ -1,5 +1,7 @@
 import sys, unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from murmur import card, theme
 
@@ -137,3 +139,18 @@ class ModelDir(unittest.TestCase):
             sys.modules.pop("murmur.stt", None)
             if saved: sys.modules["onnx_asr"] = saved
             else: sys.modules.pop("onnx_asr", None)
+
+
+
+class Appear(unittest.TestCase):
+    def test_appear_puts_the_card_back_on_top(self):
+        import murmur
+        fake = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"murmur.win": fake}), mock.patch.object(murmur, "win", fake, create=True), \
+                mock.patch.object(card, "win32_hwnd", return_value=42):
+            obj = SimpleNamespace(root=object())
+            card.Card._appear(obj)
+            fake.keep_on_top.side_effect = OSError("access denied")
+            card.Card._appear(obj)  # a failed raise must never stop the card from showing
+        self.assertEqual(fake.keep_on_top.call_args_list, [mock.call(42), mock.call(42)])
+        self.assertTrue(obj.visible)

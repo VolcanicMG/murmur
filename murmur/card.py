@@ -282,6 +282,11 @@ class Card:
     def _appear(self):
         self.visible, self._anim = True, ("in", time.monotonic())
         self._geom = ""
+        try:
+            from . import win
+            win.keep_on_top(win32_hwnd(self.root))
+        except Exception:
+            log.debug("could not raise the card to the top", exc_info=True)
 
     def _color(self):
         target = STATES[self.st][1]
