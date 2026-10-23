@@ -4,7 +4,7 @@ from collections import Counter
 from . import llm, phonetic, store
 from .prepass import restore_term_case  # noqa: F401
 from .prepass import (COMMANDS, COMMON, FILLERS, _FILL_RE, _words, apply_scratch, correct_numbers, digits_before_units, find_cue, has_scratch,  # noqa: F401  (re-exports)
-                      restore_breaks, restore_prose_identifiers, restore_quotes, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
+                      restore_breaks, restore_parens, restore_prose_identifiers, restore_quotes, spoken_addresses, spoken_breaks, spoken_command, spoken_forms, spoken_quotes)
 from .learn import (classify_edit, clean_word, detect_edit, edit_is_a_correction, is_redictation, learn_dictionary, learn_from_edit,  # noqa: F401  (re-exports)
                     learn_from_result, redictation_terms)
 
@@ -227,7 +227,7 @@ def clean_checked(raw, ctx, retry=True, shortcut=True):
     attempts = [ctx] + ([{k: v for k, v in ctx.items() if k not in ("before", "after", "selected")}]
                         if retry and any(ctx.get(k) for k in ("before", "after", "selected")) else [])
     for n, c in enumerate(attempts, 1):
-        out = restore_quotes(raw, restore_breaks(raw, restore_prose_identifiers(raw, _chat(ctx["cfg"], build_system_prompt(c), user), ctx)))
+        out = restore_parens(raw, restore_quotes(raw, restore_breaks(raw, restore_prose_identifiers(raw, _chat(ctx["cfg"], build_system_prompt(c), user), ctx))))
         out = even_list_case(restore_term_case(out, store.load_dictionary() + list(ctx.get("terms", []))))
         stripped = SNIPPET_TOKEN.sub("", out)
         judged = with_hints(raw, ctx.get("hints", []), stripped)

@@ -379,6 +379,33 @@ def restore_quotes(prepared, final):
     return out
 
 
+_PAREN = r"(?:parens?|parenthesis|parentheses)"
+_PAREN_OPEN = re.compile(rf"(?i)[,.]?\s*\b(?:open(?:ing)?|left|start|begin)\s+{_PAREN}\b[,.:]?\s*")
+_PAREN_CLOSE = re.compile(rf"(?i)[,.]?\s*\b(?:close[ds]?|closing|right|end)\s+{_PAREN}\b(?P<p>[,.]?)")
+
+
+def spoken_parens(text):
+    """'the tool open paren beta close paren ships' -> 'the tool (beta) ships'. Open/left/start + paren/parenthesis/parentheses
+    and close/right/end + the same; each cue works alone too. A bare 'parentheses' is ordinary speech ("in parentheses")."""
+    text = _PAREN_CLOSE.sub(lambda m: ")" + m.group("p"), _PAREN_OPEN.sub(" (", text))
+    return re.sub(r"\(\s+", "(", re.sub(r"\s+\)", ")", text)).strip()
+
+
+def restore_parens(prepared, final):
+    """spoken_parens' marks put back where the LLM kept the words but dropped or spelled out the brackets (as restore_quotes)."""
+    out = final
+    for m in re.finditer(r"\(([^()\n]+)\)", prepared):
+        words = re.findall(r"[A-Za-z0-9']+", m.group(1))
+        if not words or "(" + m.group(1).lower() in out.lower():
+            continue
+        hit = re.search(r"(?<![\w(])" + r"\W+".join(map(re.escape, words)) + r"(?![\w)])", out, re.I)
+        if hit:  # the LLM may have written the cue words out ("parentheses beta"): drop them beside the span
+            head = re.sub(rf"(?i)\b(?:(?:open|left|start|begin)\s+)?{_PAREN}[,.:]?\s+$", "", out[:hit.start()])
+            tail = re.sub(rf"(?i)^[,.]?\s+(?:(?:close[ds]?|closing|right|end)\s+)?{_PAREN}\b", "", out[hit.end():])
+            out = head + "(" + hit.group(0) + ")" + tail
+    return out
+
+
 _NUMWORDS = r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
 _TECH_UNITS = r"(?:milliseconds?|ms|percent|kilobytes?|megabytes?|gigabytes?|terabytes?|kb|mb|gb|tb|pixels?|px|fps|hz|kilohertz|megahertz|ghz)"
 _PROSE_UNITS = r"(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?|items?|users?|lines?|rows?|files?|tests?|requests?)"
@@ -413,7 +440,7 @@ def list_cues(text):
 def spoken_forms(text):
     """The deterministic pre-LLM rewrites, in order: list cues, number self-corrections, numbers before units, quotes,
     paragraph/line breaks, e-mail addresses and URLs."""
-    return spoken_addresses(spoken_breaks(spoken_quotes(digits_before_units(correct_numbers(list_cues(text))))))
+    return spoken_addresses(spoken_breaks(spoken_parens(spoken_quotes(digits_before_units(correct_numbers(list_cues(text)))))))
 
 
 

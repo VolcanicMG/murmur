@@ -211,6 +211,16 @@ class T(unittest.TestCase):
         self.assertEqual(a("The 2.0 release ships. Never mind that."), "")
         self.assertEqual(a("Mail a.b@example.com now. Hello there. Scratch that."), "Mail a.b@example.com now.")
 
+    def test_spoken_parentheses_become_brackets(self):  # Ethan 10-22: "(" came out as the word "parentheses"
+        f = brain.spoken_forms
+        self.assertEqual(f("The tool open paren beta close paren ships Friday."), "The tool (beta) ships Friday.")
+        self.assertEqual(f("It returns a list, open parenthesis, sorted, close parenthesis."), "It returns a list (sorted).")
+        self.assertEqual(f("Put it in parentheses please."), "Put it in parentheses please.")  # ordinary speech
+        r = brain.restore_parens
+        self.assertEqual(r("The tool (beta) ships.", "The tool beta ships."), "The tool (beta) ships.")
+        self.assertEqual(r("The tool (beta) ships.", "The tool parentheses beta ships."), "The tool (beta) ships.")
+        self.assertEqual(r("The tool (beta) ships.", "The tool (beta) ships."), "The tool (beta) ships.")
+
     def test_scratch_that_replaces_only_the_clause_a_short_correction_repeats(self):  # Ethan 10-08: got "Other repos."
         a = brain.apply_scratch
         self.assertEqual(a("Same format as the vaults, other items. Scratch that. Other repos."), "Same format as the vaults, other repos.")
