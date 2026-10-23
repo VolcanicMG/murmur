@@ -372,3 +372,28 @@ class Stages(unittest.TestCase):
         m = {"release": 10.0, "stopped": 10.35, "heard": 10.62, "cleaned": 10.85, "pasted": 10.9}
         self.assertEqual(capture.stages(m), {"tail": 0.35, "stt": 0.27, "clean": 0.23, "paste": 0.05, "total": 0.9})
         self.assertEqual(capture.stages({"release": 1.0, "stopped": 1.3}), {"tail": 0.3})  # cancelled early: partial, no total
+
+
+class PressAction(unittest.TestCase):  # Ethan 10-22: a quick re-press lost the previous take
+    def test_follow_only_dictate_after_dictate(self):
+        pa = capture.press_action
+        self.assertEqual(pa("dictate", None, False), "start")
+        self.assertEqual(pa("command", None, False), "start")
+        self.assertEqual(pa("dictate", "dictate", True), "follow")
+        self.assertEqual(pa("dictate", "dictate", False), "ignore")  # another app, or the last take was cancelled
+        self.assertEqual(pa("dictate", "command", True), "ignore")  # commands never resume
+        self.assertEqual(pa("command", "dictate", True), "ignore")
+
+    def test_old_session_stopping_never_detaches_the_new_sink(self):
+        from murmur import mic
+        m = mic.Monitor(lambda: None)
+
+        class S:
+            def audio(self, *a):
+                pass
+        old, new = S(), S()
+        m.sink = new.audio  # the follower attached
+        mic.Attached(m, old.audio).stop()  # the old session's tail ends
+        self.assertEqual(m.sink, new.audio)
+        mic.Attached(m, new.audio).stop()  # a fresh bound method still matches (==)
+        self.assertIsNone(m.sink)

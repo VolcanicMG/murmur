@@ -25,13 +25,14 @@ def device_index(cfg):
 
 
 class Attached:
-    """Stream stand-in while a session is fed by the shared Monitor: stop() detaches, close() is a no-op."""
+    """Stream stand-in while a session is fed by the shared Monitor: stop() detaches (only while `sink` is still the one
+    attached: a resumed session may already have taken the stream over), close() is a no-op."""
 
-    def __init__(self, mon):
-        self.mon = mon
+    def __init__(self, mon, sink=None):
+        self.mon, self.sink = mon, sink
 
     def stop(self):
-        self.mon.detach()
+        self.mon.detach(self.sink)
 
     def close(self):
         pass
@@ -99,7 +100,9 @@ class Monitor:
             self.stream.start()  # warm mode: a few ms, no device open on the hotkey path
         return pre
 
-    def detach(self):
+    def detach(self, sink=None):
+        if sink is not None and self.sink != sink:
+            return  # another session owns the stream now (bound methods compare by ==, not is)
         self.sink = None
         if not self.preroll and self.stream:
             try:

@@ -1,4 +1,4 @@
-import sys, unittest
+import sys, time, unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -239,11 +239,11 @@ class Adapt(unittest.TestCase):  # Track B wiring
 
     def test_dictation_log_line_has_sizes_never_text(self):
         s, _ = make(self.session, "secret words", ctx={"tone": "neutral", "before": "abc secret", "after": "", "sel_known": True})
-        s.mode, s.segments, s.redecoded, s.live_use = "dictate", 2, True, "reused"
+        s.mode, s.segments, s.redecoded, s.live_use, s.ctx_src = "dictate", 2, True, "reused", "uia"
         with self.assertLogs("murmur", "INFO") as cm:
             s._log_dictation()
-        self.assertEqual(cm.output[-1].split(":", 2)[-1], "dictation app=code.exe text=read before=10 after=0 sel=known "
-                         "anchor=none segments=2 redecoded=yes live=reused guard=ok")
+        self.assertEqual(cm.output[-1].split(":", 2)[-1], "dictation app=code.exe text=read before=10 after=0 sel=known ctx=uia "
+                         "anchor=none segments=2 redecoded=yes live=reused guard=ok resumed=no")
         s.cfg["privacy"] = {"private": True}
         with self.assertLogs("murmur", "INFO") as cm:
             s._log_dictation()
@@ -322,6 +322,281 @@ class LongTake(unittest.TestCase):
             s.ov.show = lambda *a: None
             self.assertTrue(s._start())
         self.assertEqual(seen, ["windowsterminal.exe"])
+
+
+class Resume(unittest.TestCase):  # Ethan 10-22: release and press again quickly = one dictation
+    def setUp(self):
+        self.session = load_session()
+        for name in ("play",):
+            mock.patch.object(self.session.cues, name).start()
+        mock.patch.object(self.session.autolearn, "maybe_refresh_style").start()
+        mock.patch.object(self.session.store, "keep_take").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def dictation(self, prev=None, speech=2.0, frames=1):
+        s, ov = make(self.session, "")
+        s.mode, s.prev, s.t0 = "dictate", prev, time.time() - 2
+        s.stream = SimpleNamespace(stop=lambda: None, close=lambda: None)
+        s.vad = {**s.vad, "speech_s": speech}
+        s.full = [[0] * 16000 for _ in range(frames)]
+        s.reader = SimpleNamespace(is_alive=lambda: False, join=lambda t: None)
+        ov.hide = ov.release = mock.Mock()
+        return s
+
+    def run_session(self, s, heard, during_clean=None):
+        def finish():
+            if during_clean:
+                during_clean()
+            return s.raw
+        with mock.patch.object(s, "_start", return_value=True), mock.patch.object(s, "_poll_loop"), \
+                mock.patch.object(self.session, "transcribe", side_effect=heard), \
+                mock.patch.object(s, "_finish_dictate", side_effect=finish) as fd, mock.patch.object(s, "_paste_and_log") as pl:
+            s.run()
+        return pl, fd
+
+    def handed_over(self, raw="so I was saying"):
+        old = self.dictation()
+        self.assertTrue(old.claim(False))
+        pl, fd = self.run_session(old, lambda f: raw)
+        pl.assert_not_called(); fd.assert_not_called()  # never cleaned, never pasted (so no history, no learning)
+        self.assertTrue(old.handoff.is_set())
+        return old
+
+    def test_claimed_session_hands_over_raw_and_frames_and_never_pastes(self):
+        old = self.handed_over()
+        self.assertEqual(old.raw, "so I was saying")
+        new = self.dictation(prev=old, frames=2)
+        new.resumed = True
+        pl, _ = self.run_session(new, lambda f: f"whole{len(f)}")
+        pl.assert_called_once_with("Whole3")  # the whole take (1 handed + 2 own frames) decoded in one piece
+        self.assertTrue(new.merged and new.redecoded)
+
+    def test_new_take_without_speech_pastes_the_handed_text_alone(self):
+        new = self.dictation(prev=self.handed_over(), speech=0.0)
+        new.resumed = True
+        pl, _ = self.run_session(new, lambda f: "")
+        pl.assert_called_once_with("So I was saying")
+
+    def test_a_chord_drops_only_the_new_take(self):
+        new = self.dictation(prev=self.handed_over())
+        new.resumed = True
+        new.discard()
+        pl, _ = self.run_session(new, lambda f: "control c")
+        pl.assert_called_once_with("So I was saying")
+
+    def test_esc_on_the_new_card_cancels_the_merged_dictation(self):
+        new = self.dictation(prev=self.handed_over())
+        new.resumed = True
+        new.cancel()
+        pl, _ = self.run_session(new, lambda f: "more words")
+        pl.assert_not_called()
+
+    def test_claim_during_cleanup_aborts_before_delivery(self):
+        old = self.dictation()
+        pl, fd = self.run_session(old, lambda f: "first part", during_clean=lambda: self.assertTrue(old.claim(False)))
+        fd.assert_called_once(); pl.assert_not_called()
+        self.assertTrue(old.handoff.is_set())
+
+    def test_too_late_once_delivery_started(self):
+        old = self.dictation()
+        pl, _ = self.run_session(old, lambda f: "first part")
+        pl.assert_called_once()
+        self.assertFalse(old.claim(False))  # sealed: a follower is independent
+
+    def test_commands_never_resume(self):
+        s, _ = make(self.session, "make it formal")
+        self.assertFalse(s.resumable("code.exe"))
+        s.mode = "dictate"
+        self.assertTrue(s.resumable("code.exe"))
+        self.assertFalse(s.resumable("other.exe"))
+
+    def test_a_chord_before_the_mic_opens_still_keeps_take_one(self):  # review 1
+        old = self.dictation()
+        new = self.dictation(prev=old)
+        new.discard()  # the chord / learn hotkey lands before _start
+        self.assertFalse(new.cancelled)
+        self.assertTrue(self.start(new))
+        self.assertTrue(new.resumed and old.handed)
+        new.reader = SimpleNamespace(is_alive=lambda: False, join=lambda t: None)  # _start's stubbed thread
+        self.run_session(old, lambda f: "so I was saying")
+        pl, _ = self.run_session(new, lambda f: "control c")
+        pl.assert_called_once_with("So I was saying")
+
+    def test_a_chord_with_nothing_handed_over_is_a_silent_discard(self):
+        late = self.dictation()
+        late._seal()
+        new = self.dictation(prev=late)
+        new.discard()
+        self.start(new)
+        self.assertFalse(new.resumed)
+        pl, _ = self.run_session(new, lambda f: "control c")
+        pl.assert_not_called()
+        self.assertTrue(new.cancelled and new.silent)
+
+    def test_never_claim_an_unverified_password_or_a_private_flip(self):  # review 2
+        pending, _ = make(self.session, "", verdict="pending")
+        pending.mode = "dictate"
+        self.assertFalse(pending.claim(False))
+        pw, _ = make(self.session, "", ctx={"tone": "neutral", "password": True})
+        pw.mode = "dictate"
+        self.assertFalse(pw.claim(False))
+        ok = self.dictation()
+        self.assertFalse(ok.claim(True))  # private mode was switched on between the takes
+        self.assertTrue(ok.claim(False))
+
+    def test_esc_on_the_taken_over_session_cancels_the_follower(self):  # review 3
+        old = self.dictation()
+        self.assertTrue(old.claim(False))
+        old.cancel()
+        self.run_session(old, lambda f: "first part")
+        new = self.dictation(prev=old)
+        new.resumed = True
+        pl, _ = self.run_session(new, lambda f: "more")
+        pl.assert_not_called()
+        self.assertTrue(new.cancelled)
+
+    def test_a_crashed_previous_session_is_not_absorbed(self):
+        old = self.dictation()
+        self.assertTrue(old.claim(False))
+        old.raw = "partial live words"
+
+        def boom(f):
+            raise RuntimeError("stt")
+        self.run_session(old, boom)
+        self.assertTrue(old.crashed and old.handoff.is_set())
+        new = self.dictation(prev=old)
+        new.resumed = True
+        pl, _ = self.run_session(new, lambda f: "second take")
+        pl.assert_called_once_with("Second take")
+        self.assertFalse(new.merged)
+
+    def test_spoken_command_in_take_one_runs_and_hands_nothing_over(self):  # review 5
+        old = self.dictation()
+        self.assertTrue(old.claim(False))
+        with mock.patch.object(old, "_cmd_undo") as undo:
+            self.run_session(old, lambda f: "undo that")
+        undo.assert_called_once()
+        new = self.dictation(prev=old)
+        new.resumed = True
+        pl, _ = self.run_session(new, lambda f: "hello there")
+        pl.assert_called_once_with("Hello there")
+        self.assertFalse(new.merged)
+
+    def test_claim_during_the_password_wait_skips_keep_take_and_the_clean(self):  # review 6
+        old = self.dictation()
+        real = old._decide_password
+        with mock.patch.object(old, "_decide_password", side_effect=lambda: (real(), old.claim(False))):
+            pl, fd = self.run_session(old, lambda f: "first part")
+        self.session.store.keep_take.assert_not_called()
+        fd.assert_not_called(); pl.assert_not_called()
+
+    def run_ordered(self, s, raw, order, gate=None):
+        """run() with instance-only stubs (safe on two threads at once); the paste appends raw to order."""
+        def finish():
+            if gate:
+                gate.wait(5)
+            return s.raw
+        s._start, s._poll_loop = (lambda: True), (lambda: None)
+        s._final_transcript, s._finish_dictate = (lambda: raw), finish
+        s._paste_and_log = lambda final: order.append(raw)
+        s.run()
+
+    def refused_pair(self):
+        old = self.dictation()
+        new = self.dictation(prev=old)
+        new.was_private = True  # private mode flipped between the takes: the claim is refused
+        self.assertTrue(self.start(new))
+        self.assertFalse(new.resumed)
+        self.assertIs(new.after, old)
+        new.reader = SimpleNamespace(is_alive=lambda: False, join=lambda t: None)
+        new.t0 = time.time() - 2
+        return old, new
+
+    def test_refused_claim_keeps_paste_order(self):  # re-review R1
+        import threading
+        old, new = self.refused_pair()
+        order, gate = [], threading.Event()
+        ta = threading.Thread(target=self.run_ordered, args=(old, "first", order, gate)); ta.start()
+        tb = threading.Thread(target=self.run_ordered, args=(new, "second", order)); tb.start()
+        tb.join(0.3)
+        self.assertEqual(order, [])  # B is ready but waits for the slow A
+        gate.set(); ta.join(5); tb.join(5)
+        self.assertEqual(order, ["first", "second"])
+
+    def test_a_stuck_previous_session_only_delays_the_paste(self):
+        old, new = self.refused_pair()
+        new.PREV_WAIT, order = 0.05, []
+        with self.assertLogs("murmur", "WARNING"):
+            self.run_ordered(new, "second", order)  # A never finishes
+        self.assertEqual(order, ["second"])
+
+    def start(self, new, fail=False):
+        new.mic = None
+        sd = mock.MagicMock()
+        if fail:
+            sd.InputStream.side_effect = OSError("no mic")
+        new.ov.show = lambda *a: None
+        with mock.patch.object(self.session.context, "gather", lambda cfg: {"app": "code.exe", "title": "t", "tone": "neutral"}), \
+                mock.patch.object(self.session.threading, "Thread", lambda target, daemon: SimpleNamespace(start=lambda: None)), \
+                mock.patch.object(self.session, "sd", sd), mock.patch.object(self.session, "mic"):
+            return new._start()
+
+    def test_start_claims_only_once_the_mic_works(self):
+        old = self.dictation()
+        self.assertFalse(self.start(self.dictation(prev=old), fail=True))
+        self.assertFalse(old.handed)  # the old take still pastes itself
+        new = self.dictation(prev=old)
+        self.assertTrue(self.start(new))
+        self.assertTrue(new.resumed and old.handed and old.cut_tail.is_set())
+        late = self.dictation()
+        late._seal()
+        new2 = self.dictation(prev=late)
+        self.start(new2)
+        self.assertFalse(new2.resumed); self.assertIsNone(new2.prev)
+
+
+class OwnContext(unittest.TestCase):  # Ethan 10-22: no space after the period in a terminal
+    def setUp(self):
+        self.session = load_session()
+
+    def session_in(self, ctx=None, typed=0.0, age=5.0, private=False):
+        s, _ = make(self.session, "x", app="windowsterminal.exe", ctx=ctx)
+        s.mode = "dictate"
+        s.last_paste = lambda: (time.time() - age, "windowsterminal.exe", "Hello there.")
+        s.typed_at = lambda: time.time() - age + typed if typed else 0.0
+        if private:
+            s.cfg["privacy"] = {"private": True}
+        return s
+
+    def test_last_paste_stands_in_for_an_unreadable_field(self):
+        s = self.session_in()
+        s._own_context()
+        self.assertEqual((s.ctx["before"], s.ctx_src), ("Hello there.", "lastpaste"))
+        self.assertEqual(self.session.brain.fit("Next.", s.ctx["before"]), " Next.")
+
+    def test_gates(self):
+        for s in (self.session_in(typed=1.0), self.session_in(age=200), self.session_in(private=True),
+                  self.session_in(ctx={"tone": "neutral", "password": True})):
+            s._own_context()
+            self.assertEqual((s.ctx.get("before", ""), s.ctx_src), ("", "none"))
+        s = self.session_in(ctx={"tone": "neutral", "before": ""})  # UIA read a known-empty field: stays empty
+        s._own_context()
+        self.assertEqual((s.ctx["before"], s.ctx_src), ("", "none"))
+        s = self.session_in(ctx={"tone": "neutral", "before": "typed by hand"})
+        s._own_context()
+        self.assertEqual((s.ctx["before"], s.ctx_src), ("typed by hand", "uia"))
+
+    def test_deliver_brackets_our_paste_keys(self):
+        s, _ = make(self.session, "x")
+        seen = []
+        s.pasting = seen.append
+        with mock.patch.object(self.session.win, "active_app", return_value=("code.exe", "t")), \
+                mock.patch.object(self.session.win, "insert", side_effect=lambda *a: seen.append("insert")):
+            self.assertTrue(s._deliver("hi"))
+        with mock.patch.object(self.session.win, "active_app", side_effect=RuntimeError), mock.patch.object(self.session.win, "to_clipboard"):
+            self.assertFalse(s._deliver("hi"))
+        self.assertEqual(seen, [True, "insert", False, True, False])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,24 +8,32 @@ from . import tray
 from .tray import TOOLTIPS, tray_image
 
 log = logging.getLogger("murmur")
-S = {"mode": None, "held": False, "paused": False, "sid": 0, "last_paste": (0.0, "", ""), "capturing": False, "ready": False, "session": None, "g": ("idle", 0.0), "dropped": False, "last_fg": "", "keys": {}, "pending_rebind": False}  # shared hotkey/session state
+S = {"mode": None, "held": False, "paused": False, "sid": 0, "last_paste": (0.0, "", ""), "capturing": False, "ready": False, "session": None, "g": ("idle", 0.0), "dropped": False, "last_fg": "", "keys": {}, "pending_rebind": False, "typed_at": 0.0, "pasting_until": 0.0}  # shared hotkey/session state
 _bound = {"ov": None, "mark": None, "removers": []}  # hotkey registration bookkeeping (see rebind_hotkeys)
 _NOT_FG = {"", "python.exe", "pythonw.exe", "murmur.exe", "explorer.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe"}
+_MODS = {"ctrl", "left ctrl", "right ctrl", "shift", "left shift", "right shift", "alt", "left alt", "right alt", "alt gr",
+         "windows", "left windows", "right windows"}  # key-downs that are not typing
+PASTE_QUIET_S = 0.3  # our injected paste keys reach the hook shortly after win.insert returns
 _learn_lock = threading.Lock()  # a double press must not race copy_selection (clipboard)
 
 
 def _hooks(sid, mark, retry):
+    """Session hooks bound to one session id. Once a newer session started (a resume), the old one's held/stop/done/mark
+    no longer touch the shared state."""
     def held():
-        return S["held"]
+        return S["held"] and current()
 
     def stop():
-        S["held"] = False
-        S["g"] = capture.gesture(S["g"], "stop", time.monotonic())[0]  # Esc/Enter/silence ended it: forget a latch
+        if current():
+            S["held"] = False
+            S["g"] = capture.gesture(S["g"], "stop", time.monotonic())[0]  # Esc/Enter/silence ended it: forget a latch
 
     def current():
         return S["sid"] == sid
 
     def done():
+        if not current():
+            return  # a newer session owns S
         S["mode"] = None; S["session"] = None
         if S["g"][0] == "latched":
             S["g"] = ("idle", 0.0)
@@ -38,7 +46,13 @@ def _hooks(sid, mark, retry):
 
     def last_paste():
         return S["last_paste"]
-    return SimpleNamespace(held=held, stop=stop, current=current, done=done, mark=mark, pasted=pasted, last_paste=last_paste, retry=retry, live=lambda: bool(S["session"]), mic=S.get("mic"), vad=S.get("vad"))
+
+    def pasting(on):
+        """Around Session._deliver: other_key ignores every key until PASTE_QUIET_S after the insert returned."""
+        S["pasting_until"] = float("inf") if on else time.monotonic() + PASTE_QUIET_S
+    return SimpleNamespace(held=held, stop=stop, current=current, done=done, mark=lambda st: current() and mark(st), pasted=pasted,
+                           last_paste=last_paste, retry=retry, live=lambda: bool(S["session"]), mic=S.get("mic"), vad=S.get("vad"),
+                           pasting=pasting, typed_at=lambda: S["typed_at"])
 
 
 def probe_mic(cfg, ov):
@@ -147,21 +161,32 @@ def press(mode, cfg, ov, mark):
             S["held"] = False
         if action != "start":
             return
-    if S["mode"] or S["paused"] or S["capturing"] or not S["ready"]:
+    prev = S["session"]
+    can = S["mode"] == mode == "dictate" and prev is not None and prev.resumable(win.active_app()[0])
+    act = capture.press_action(mode, S["mode"], can)
+    if act == "ignore" or S["paused"] or S["capturing"] or not S["ready"]:
         if mode == "dictate":
             S["g"] = ("idle", 0.0)
         return
+    if act == "follow":
+        log.info("dictate press while the last dictation finishes: following it")
     S.update(mode=mode, held=True, sid=S["sid"] + 1)
     if mode == "command":
         keyboard.send(-0xE8)  # mask alt so a lone alt tap doesn't open the app menu
-    sess = Session(mode, cfg, ov, _hooks(S["sid"], mark, lambda: probe_mic(cfg, ov)))
+    sess = Session(mode, cfg, ov, _hooks(S["sid"], mark, lambda: probe_mic(cfg, ov)), prev=prev if act == "follow" else None)
     S["session"] = sess
     threading.Thread(target=sess.run, daemon=True).start()
 
 
 def other_key(event, dictate_key, cfg=None):
-    """Global non-suppressing hook: any other key going down while the dictate key is held marks a chord."""
-    if event.event_type == "down" and S["g"][0] == "down" and not store.key_matches(event.name, dictate_key):
+    """Global non-suppressing hook: any other key going down while the dictate key is held marks a chord, and every
+    non-modifier key-down records when the user last typed (brain.own_before). Keys inside the pasting window are
+    murmur's own injected paste: neither a chord nor typing (a user key in that window is missed too)."""
+    if event.event_type != "down" or time.monotonic() < S["pasting_until"] or store.key_matches(event.name, dictate_key):
+        return
+    if (event.name or "").lower() not in _MODS:
+        S["typed_at"] = time.time()  # wall clock, like last_paste's time
+    if S["g"][0] == "down":
         S["g"] = capture.gesture(S["g"], "other", time.monotonic(), _tap_ms(cfg or {}))[0]
 
 

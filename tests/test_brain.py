@@ -137,6 +137,25 @@ class T(unittest.TestCase):
             self.assertEqual(brain.fit(f, b), want)
         self.assertEqual(brain.fit("and", 'said "yes"'), " and")
 
+    def test_fit_lowercases_an_ordinary_word_mid_sentence(self):  # Ethan 10-22: resuming a broken sentence
+        mid = "so we went over to the"
+        for f, want in (("The store", " the store"), ("And then it broke.", " and then it broke."), ("A test", " a test"),
+                        ("Podstead is down", " Podstead is down"), ("I think so", " I think so"), ("I'm in", " I'm in"),
+                        ("OK then", " OK then"), ("Ethan said", " Ethan said"), ("NASA called", " NASA called"),
+                        ("getUser() fails", " getUser() fails"), ("Will said yes", " Will said yes"), ("May is here", " May is here")):
+            self.assertEqual(brain.fit(f, mid), want, f)
+        self.assertEqual(brain.fit("Next one.", "Hello there."), " Next one.")  # a finished sentence: space, capital kept
+
+    def test_own_before_is_our_last_paste_only_when_nothing_was_typed(self):
+        last = (100.0, "windowsterminal.exe", "Hello there.")
+        ob = brain.own_before
+        self.assertEqual(ob(last, "windowsterminal.exe", 105.0, 0.0), "Hello there.")
+        self.assertEqual(ob(last, "code.exe", 105.0, 0.0), "")  # another app
+        self.assertEqual(ob(last, "windowsterminal.exe", 100.0 + brain.OWN_PASTE_S, 0.0), "")  # too old
+        self.assertEqual(ob(last, "windowsterminal.exe", 105.0, 101.0), "")  # typed since the paste
+        self.assertEqual(ob(last, "windowsterminal.exe", 105.0, 99.0), "Hello there.")  # typed before it
+        self.assertEqual(ob((0.0, "", ""), "", 5.0, 0.0), "")  # nothing pasted yet
+
     def test_context_section(self):
         self.assertEqual(brain._context({}), "")
         p = brain._context({"before": "We should ship it and", "after": "tomorrow.", "selected": "x"})

@@ -135,14 +135,34 @@ def cap_first(text):
     return text[:m.end()] + rest[0].upper() + rest[1:]
 
 
+_NAMEISH = set("will may june april august mark bill frank grace hope joy rose pat sue dawn art ray max rich".split())  # COMMON words that are also names
+
+
+def lower_first(text):
+    """Mid-sentence joint: lowercase the first word only when it is an ordinary word (prepass.COMMON). 'I', names,
+    acronyms, dictionary terms and code-looking tokens keep their case."""
+    m = re.match(r"[\s\"'\u201c\u2018(\[]*", text)
+    rest = text[m.end():]
+    w = re.match(r"[A-Za-z]+", rest)
+    if not w:
+        return text
+    word = w.group()
+    if word == "I" or word.lower() not in COMMON - _NAMEISH or (len(word) > 1 and not word[1:].islower()) or _codey(rest.split(None, 1)[0]):
+        return text
+    return text[:m.end()] + rest[0].lower() + rest[1:]
+
+
 def fit(final, before, tone=None):
     """Deterministic joint with the text before the cursor: drop repeats, fix capital (continuation) and spacing."""
     if not final:
         return final
     if before:
         final = _drop_repeat(final, before)
-    if final and continuation(before) == "new" and not (tone == "code" and not before.strip()):  # terminal/unknown before in code: keep the LLM's casing
+    cont = continuation(before)
+    if final and cont == "new" and not (tone == "code" and not before.strip()):  # terminal/unknown before in code: keep the LLM's casing
         final = cap_first(final)
+    elif final and cont == "mid":
+        final = lower_first(final)
     if not before or not final or before.endswith("\n"):
         return final
     b = before[-1]
@@ -460,6 +480,17 @@ def command_intent(instruction, tone=None, has_selection=False):
 
 
 LAST_WINDOW = 600  # seconds a paste stays editable by a spoken command
+
+
+OWN_PASTE_S = 120  # how long murmur's own last paste may stand in for an unreadable field
+
+
+def own_before(last_paste, app, now, typed_at):
+    """The text before the caret when the field can't be read (terminals, a failed UIA read): murmur's own last paste into
+    the same app, under OWN_PASTE_S old, with no key typed since (typed_at: wall time of the last typed key). '' otherwise.
+    ponytail: mouse clicks are invisible to the key hook, so a click that moved the caret still counts as 'right after the paste'."""
+    t, lapp, text = last_paste
+    return text if text and app and lapp == app and 0 <= now - t < OWN_PASTE_S and typed_at < t else ""
 
 
 def resolve_target(sel, before, last_paste, where):

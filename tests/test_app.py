@@ -1,5 +1,6 @@
 import sys, tempfile, unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -196,6 +197,67 @@ class Exclusions(unittest.TestCase):
         with mock.patch.object(self.app.win, "active_app", return_value=("game.exe", "t")), mock.patch.object(self.app.win, "quns_state", return_value=0):
             self.app.press("dictate", self.cfg, mock.Mock(), lambda s: None)
         self.assertEqual((self.app.S["mode"], self.app.S["g"]), (None, ("idle", 0.0)))  # no session, no gesture state
+
+
+
+class Resume(unittest.TestCase):  # Ethan 10-22: a quick re-press lost the previous take
+    def setUp(self):
+        self.app, _ = load_app()
+        self.app.S.update(session=None, mode=None, ready=True, paused=False, capturing=False, g=("idle", 0.0), held=False,
+                          sid=5, pasting_until=0.0, typed_at=0.0)
+
+    def press_while_finishing(self, busy="dictate", resumable=True, app="code.exe"):
+        prev = mock.Mock(); prev.resumable.side_effect = lambda a: resumable and a == "code.exe"
+        self.app.S.update(session=prev, mode=busy)
+        with mock.patch.object(self.app.win, "active_app", return_value=(app, "t")), mock.patch.object(self.app, "Session") as sess, \
+                mock.patch.object(self.app.threading, "Thread"):
+            self.app.press("dictate", cfg(), mock.Mock(), lambda s: None)
+        return prev, sess
+
+    def test_dictate_press_while_the_last_dictation_finishes_follows_it(self):
+        prev, sess = self.press_while_finishing()
+        self.assertIs(sess.call_args.kwargs["prev"], prev)
+        self.assertEqual((self.app.S["mode"], self.app.S["sid"], self.app.S["g"][0]), ("dictate", 6, "down"))
+        self.assertIs(self.app.S["session"], sess.return_value)  # only the new session owns S
+
+    def test_other_app_or_a_command_is_ignored(self):
+        for kw in ({"app": "other.exe"}, {"busy": "command"}, {"resumable": False}):
+            self.setUp()
+            prev, sess = self.press_while_finishing(**kw)
+            sess.assert_not_called()
+            self.assertEqual((self.app.S["session"], self.app.S["g"]), (prev, ("idle", 0.0)), kw)
+
+    def test_old_session_hooks_go_quiet_once_a_new_one_starts(self):
+        marks = []
+        old = self.app._hooks(5, marks.append, None)
+        self.app.S.update(session="new", mode="dictate", held=True)
+        self.assertTrue(old.held())
+        self.app.S["sid"] = 6  # the follower started
+        self.assertFalse(old.held())  # the old poll loop must not keep recording on the new press
+        old.stop(); old.done(); old.mark("idle")
+        self.assertEqual((self.app.S["held"], self.app.S["session"], self.app.S["mode"], marks), (True, "new", "dictate", []))
+        self.app._hooks(6, marks.append, None).done()
+        self.assertEqual((self.app.S["session"], self.app.S["mode"]), (None, None))
+
+    def test_other_key_ignores_our_paste_and_records_typing(self):
+        ev = lambda name: SimpleNamespace(event_type="down", name=name)  # noqa: E731
+        self.app.S["g"] = ("down", self.app.time.monotonic())
+        hooks = self.app._hooks(5, lambda s: None, None)
+        hooks.pasting(True)
+        for k in ("ctrl", "v"):
+            self.app.other_key(ev(k), "right ctrl")
+        self.assertEqual((self.app.S["g"][0], self.app.S["typed_at"]), ("down", 0.0))  # no chord, not typing
+        hooks.pasting(False)
+        self.app.other_key(ev("v"), "right ctrl")
+        self.assertEqual((self.app.S["g"][0], self.app.S["typed_at"]), ("down", 0.0))  # still inside the quiet window
+        self.app.S["pasting_until"] = 0.0
+        self.app.other_key(ev("shift"), "right ctrl")
+        self.assertEqual((self.app.S["g"][0], self.app.S["typed_at"]), ("chord", 0.0))  # a modifier chords but is not typing
+        self.app.other_key(ev("a"), "right ctrl")
+        self.assertGreater(self.app.S["typed_at"], 0.0)
+        before = self.app.S["typed_at"]
+        self.app.other_key(ev("right ctrl"), "right ctrl")
+        self.assertEqual(self.app.S["typed_at"], before)  # the dictate key is never typing
 
 
 if __name__ == "__main__":

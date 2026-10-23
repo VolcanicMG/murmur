@@ -32,6 +32,16 @@ def gesture(state, event, t, tap_ms=300):
     return (idle, "none") if name in ("stopping", "spent") else (state, "none")
 
 
+def press_action(mode, busy, can_follow):
+    """What a hotkey press the gesture let through does. busy = mode of the session still running (None = none).
+    "start" when nothing runs; "follow" for a dictate press while the previous dictation is still finishing and can be
+    followed (same app, not cancelled): the new session takes that dictation over unless it already started pasting;
+    else "ignore". Commands never follow and are never followed."""
+    if not busy:
+        return "start"
+    return "follow" if mode == busy == "dictate" and can_follow else "ignore"
+
+
 def stale(state, now, session_alive, age=2.0):
     """True if the gesture state is stuck: not idle, no session, and untouched for `age` seconds (a missed key release:
     elevated window, Win+L, hook timeout). Every non-idle state carries a monotonic timestamp."""

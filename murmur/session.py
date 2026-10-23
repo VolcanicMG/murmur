@@ -31,9 +31,15 @@ def transcribe(buf):
 
 class Session:
     """hooks: held() key down, stop() end the recording, current() newest session, done() release shared state,
-    mark(state) tray icon state, pasted(app, text)/last_paste() = (time, app, text) for spoken undo and editing the last dictation, retry() re-probe the mic."""
+    mark(state) tray icon state, pasted(app, text)/last_paste() = (time, app, text) for spoken undo and editing the last dictation, retry() re-probe the mic,
+    pasting(on) brackets our own paste keys, typed_at() wall time of the last typed key.
+    prev: the previous dictate session, still finishing, that this one follows (app.press). Once the mic is open this
+    session claims it: unless prev already started delivering, prev hands over its raw transcript, frames and speaking
+    totals and exits without cleaning, pasting, history or learning, and the two takes are ONE dictation from then on
+    (re-decoded whole, cleaned once, one history row; Esc drops both; a new take with no speech or a chord pastes the
+    handed-over words alone). If the claim fails this session is independent."""
 
-    def __init__(self, mode, cfg, ov, hooks):
+    def __init__(self, mode, cfg, ov, hooks, prev=None):
         self.mode, self.cfg, self.ov = mode, cfg, ov
         self.held, self.stop, self.current, self.done, self.mark = hooks.held, hooks.stop, hooks.current, hooks.done, hooks.mark
         self.retry, self.mic = hooks.retry, getattr(hooks, "mic", None)  # mic: the always-open monitor (pre-roll), or None
@@ -42,6 +48,14 @@ class Session:
             self.vad_model.reset()
         self.live = getattr(hooks, "live", lambda: False)  # is any session running (deferred background work waits)
         self.pasted, self.last_paste = hooks.pasted, hooks.last_paste  # (time, app, text) of the last paste lives in app state across sessions
+        self.pasting, self.typed_at = getattr(hooks, "pasting", lambda on: None), getattr(hooks, "typed_at", lambda: 0.0)
+        self.prev, self.resumed, self.merged, self.drop_new = prev, False, False, False  # resume hand-off (see the class docstring)
+        self.head_frames, self.head_vad, self.t_first = [], (0.0, 0), None  # what a claimed session handed over
+        self._lock, self.handed, self.sealed = threading.Lock(), False, False  # sealed: delivering or done, can't be claimed
+        self.cut_tail, self.handoff = threading.Event(), threading.Event()  # claim ends the tail; handoff = transcript final
+        self.ctx_src = "none"  # where ctx["before"] came from, for the dictation log line
+        self.was_private, self.acted, self.crashed = store.is_private(cfg), False, False  # claim gates; acted = ran a spoken command
+        self.after, self.finished = None, threading.Event()  # after: a still-running prev we could not take over; pastes first
         self.stream, self.buf = None, []
         self.raw, self.cleaned, self.inflight = "", ("", "", False, True), (None, None)  # cleaned = (raw, text, had_ctx, plausible); inflight = (raw, Event)
         self.app = self.title = ""
@@ -65,12 +79,18 @@ class Session:
         self._post(lambda: self.ov.state(self.ov.st, label=self.label))
 
     def discard(self):
-        """Drop the session silently (no card cue): a chord, or the learn hotkey right after the start."""
+        """Drop the session silently (no card cue): a chord, or the learn hotkey right after the start. A resumed session
+        drops only its new take: the handed-over words are still pasted."""
+        if self.resumed or self.prev is not None:  # may still claim: run() cancels silently if nothing was handed over
+            self.drop_new = True
+            self.stop()
+            return
         self.silent = True
         self.cancel()
 
     def cancel(self):
-        """Esc on the card: discard everything (no paste, no history), at any point."""
+        """Esc on the card: discard everything (no paste, no history), at any point. A resumed session is one dictation with
+        the take it took over, so this drops both."""
         self.cancelled = True
         self.stop()
         self.ov.post(self.ov.hide)  # hide also unbinds Esc/Enter, even while the LLM call is still running
@@ -81,6 +101,47 @@ class Session:
             self.stop()
         elif self.mode == "dictate":  # a command has no raw text to fall back to; Esc cancels it
             self.paste_now = True
+
+    def resumable(self, app):
+        """Can a dictate press in `app` follow this session? A dictation in the same app that was not cancelled; whether it
+        is still early enough to take it over is claim()'s call."""
+        return self.mode == "dictate" and bool(self.app) and app == self.app and not self.cancelled
+
+    def claim(self, private):
+        """Hand this dictation to the session that follows it: the tail ends now and run() exits after the transcript.
+        False once delivery started (or the session ended): too late, the follower is independent. Also False unless UIA
+        said this is NOT a password field (pending/unknown/password never merge into a normal session) or when private
+        mode differs from the follower's (`private`)."""
+        with self._lock:
+            if self.sealed or self.cancelled or self.verdict.value is not False or private != self.was_private:
+                return False
+            self.handed = True
+        self.cut_tail.set()
+        return True
+
+    def _seal(self):
+        """About to act on the result (paste, spoken command): True unless already handed over; no claim succeeds after."""
+        with self._lock:
+            self.sealed = True
+            return not self.handed
+
+    def _absorb(self, timeout):
+        """Take over the claimed previous dictation once its transcript is final: its raw text becomes the committed
+        prefix, its frames go in front of ours. Runs on this session's thread only; idempotent."""
+        p = self.prev
+        if p is None or not p.handoff.wait(timeout):
+            if p is not None and timeout:
+                log.warning("resume: the previous dictation never handed over")
+            return
+        self.prev = None
+        if p.cancelled and not p.silent:
+            self.cancel()  # Esc on the take we took over: the whole dictation is cancelled
+            return
+        if p.raw and not (p.cancelled or p.crashed or p.acted):
+            self.merged, self.committed = True, self._join(p.raw, self.committed)
+            self.head_frames = p.head_frames + p.full
+            self.head_vad = (p.head_vad[0] + p.vad["speech_s"], p.head_vad[1] + p.vad["pauses"] + 1)  # the gap counts as a pause
+            self.t_first = p.t_first or p.t0
 
     def _post(self, fn):
         """Post to the Tk thread, dropped if a newer session has taken over the card by then."""
@@ -93,61 +154,109 @@ class Session:
             self._poll_loop()
             self.marks["release"] = time.monotonic()
             if not self.cancelled and not self.vad_decision:
-                time.sleep(store.tail_s(self.cfg))  # the word still in the air when the key came up
+                self.cut_tail.wait(store.tail_s(self.cfg))  # the word still in the air when the key came up (a claim cuts it)
             self.stream.stop()
             self.t_end, self.marks["stopped"] = time.time(), time.monotonic()  # recording length for the speaking metrics
-            if self.cancelled or time.time() - self.t0 < 0.3:
+            if self.resumed:
+                self._absorb(30)
+            if self.drop_new and not self.merged:  # a chord with nothing handed over: the plain silent discard
+                self.silent = True
+                self.cancel()
+            if self.cancelled or (time.time() - self.t0 < 0.3 and not self.merged):
                 return
-            self.raw = self._final_transcript()
+            self.raw = self._merged_transcript() if self.merged else self._final_transcript()
             self.marks["heard"] = time.monotonic()
             if self.raw and not self.committed and capture.hallucinated(self.raw, self.vad["speech_s"]):
                 log.info("dropped %d words: %.2f s of speech detected", len(self.raw.split()), self.vad["speech_s"])
                 self.raw = ""
+            if self.mode == "dictate" and (name := brain.spoken_command(self.raw)):
+                self._seal()  # a spoken command acts here and hands nothing over: a follower is independent
+                self.acted = True
+                self.handoff.set()
+                self._cue("stop")
+                getattr(self, "_cmd_" + name)()
+                return
+            self.handoff.set()  # raw is final: a follower may read it (also set in finally for every other exit)
+            if self.handed:
+                return  # the next session owns this dictation now
             if not self.raw:
                 if self.vad_decision == "cancel" or self.vad["speech_s"] < capture.MIN_SPEECH_S:  # nothing was said: only now discard
                     self._cue("cancel")
                     self._post(lambda: self.ov.state("nothing", "No speech heard.", label="No speech"))
                 return
             self._cue("stop")
-            if self.mode == "dictate" and (name := brain.spoken_command(self.raw)):
-                getattr(self, "_cmd_" + name)()
-                return
             if self.mode == "dictate" and brain.has_scratch(self.raw) and not brain.apply_scratch(self.raw):
+                if not self._seal():
+                    return
                 self._cue("cancel")
                 self._post(lambda: self.ov.state("nothing", "Scratched.", label="Scratched"))  # whole utterance scratched
                 return
             self._decide_password()
-            if not self.sensitive:
-                store.keep_take(self.cfg, self.full, self.raw, self.t_end - self.t0)
+            if not self.sensitive and not self.handed:
+                store.keep_take(self.cfg, self.head_frames + self.full, self.raw, self.t_end - (self.t_first or self.t0))
             self.reader.join(1.0 if self.mode == "command" else 0.4)  # never block dictation on UIA
+            if self.mode == "dictate":
+                self._own_context()
             if self.sensitive:
                 where = "a password field" if self.password else "this field"
                 self._post(lambda: setattr(self.ov, "dest", f"{where} \u00b7 not saved"))
+            if self.handed:
+                return
             self.mark("polishing")
             final = self._finish_command() if self.mode == "command" else self._finish_dictate()
             self.marks["cleaned"] = time.monotonic()
             if final and self.mode == "dictate" and not self.sensitive:
                 final = brain.fit(self._tag_files(final), self.ctx.get("before", ""), self.ctx.get("tone"))
             if final and not self.cancelled:
+                self._wait_after()
+            if final and not self.cancelled and self._seal():
                 self._paste_and_log(final)
         except Exception:
+            self.crashed = True
             log.exception("session failed")
         finally:
-            self._release_last()
-            self._cleanup()
+            self._seal()
+            self.handoff.set()  # a follower waiting in _absorb reads raw/full now
+            try:
+                self._release_last()
+                self._cleanup()
+            finally:
+                self.finished.set()
+
+    PREV_WAIT = 10  # seconds a session waits for an independent, still-running previous one to paste first
+
+    def _wait_after(self):
+        """Keep paste order: a previous dictation we could not take over (verdict, private flip, already delivering) pastes
+        before ours. Bounded: a stuck one only delays us."""
+        if self.after is not None and not self.after.finished.wait(self.PREV_WAIT):
+            log.warning("previous dictation still running after %d s; pasting anyway", self.PREV_WAIT)
+        self.after = None
 
     def _final_transcript(self):
         """The take's transcript at release. Committed segments were decoded without the words on the other side of each cut,
         which costs accuracy there (Ethan's 10-08 takes: "vaults" -> "bolts", "Life 360" -> "Life Through Sixty"), so a take
         of up to REDECODE_S is decoded again in one piece; the segments only ever fed the live card."""
-        if self.committed and sum(len(f) for f in self.full) <= REDECODE_S * 16000:
+        whole = self.head_frames + self.full
+        if self.committed and sum(len(f) for f in whole) <= REDECODE_S * 16000:
             self.redecoded = True
-            return transcribe(self.full) or self._compose(transcribe(self.buf))
+            return transcribe(whole) or self._compose(transcribe(self.buf))
         return self._compose(transcribe(self.buf))
+
+    def _merged_transcript(self):
+        """A resumed dictation: the whole take re-decoded, unless the new take added nothing (a chord, or no/hallucinated
+        speech): then the handed-over words alone."""
+        tail = "" if self.drop_new else transcribe(self.full) if self.vad["speech_s"] < capture.MIN_SPEECH_S else None
+        if tail is not None and (not tail or capture.hallucinated(tail, self.vad["speech_s"])):
+            return self.committed
+        return self._final_transcript()
+
+    @staticmethod
+    def _join(*parts):
+        return " ".join(t for t in parts if t)
 
     def _compose(self, open_text):
         """Full transcript: committed long-dictation segments plus the still-open one."""
-        return " ".join(t for t in (self.committed, open_text) if t)
+        return self._join(self.committed, open_text)
 
     def _tag_files(self, text):
         """Swap spoken file names for workspace paths (code editors); any failure or a not-yet-built index leaves the text as is."""
@@ -216,7 +325,7 @@ class Session:
             if pre is not None:
                 for f in pre:
                     self._audio(f)  # the pre-roll: what the mic heard just before the key went down
-                self.stream = mic.Attached(self.mic)
+                self.stream = mic.Attached(self.mic, self._audio)
             else:
                 self.stream = sd.InputStream(samplerate=16000, channels=1, dtype="float32", callback=self._audio, device=mic.device_index(self.cfg))
                 self.stream.start()  # first, so the first syllable isn't clipped
@@ -227,6 +336,11 @@ class Session:
             self._post(lambda: (self.ov.show(self.mode, "", self._handlers()), self.ov.state("error")))
             return False
         self.t0 = time.time()
+        if self.prev is not None and not self.cancelled:  # only once the mic works: a failed start leaves the previous dictation to paste itself
+            self.resumed = self.prev.claim(self.was_private)
+            log.info("resume: %s", "took over the previous dictation" if self.resumed else "too late, independent")
+            if not self.resumed:
+                self.after, self.prev = self.prev, None
         self._cue("start")
         self.mark("recording")
         self.ctx = {"cfg": self.cfg, "private": True, **context.gather(self.cfg)}  # logs stay redacted until UIA clears the field
@@ -262,6 +376,8 @@ class Session:
     def _poll_loop(self):
         while self.held():
             time.sleep(0.6)
+            if self.resumed:
+                self._absorb(0)  # the card shows the handed-over words as soon as they are final
             if time.time() - self.t0 >= MAX_SESSION:
                 log.info("recording hit the %d s cap; finishing", MAX_SESSION)
                 self.stop()
@@ -388,7 +504,7 @@ class Session:
         timeout = wait_cap(self.cfg, n)
         if n <= 1 and self.cleaned[0] != raw and self.inflight[0] == raw:
             self._wait(self.inflight[1], timeout)  # reuse the in-flight request
-        if self.paste_now or self.cancelled:
+        if self.paste_now or self.cancelled or self.handed:  # handed: never start a clean that would hold the bundled server
             return self._prep(raw)
         if n <= 1 and self.cleaned[0] == raw and self.cleaned[2] == ("before" in self.ctx):
             self.route, self.live_use = self.live_route, "reused"
@@ -416,9 +532,9 @@ class Session:
             done.set()
 
     def _wait(self, ev, timeout):
-        """Wait for ev, but give up early when the user presses Enter (paste raw) or Esc (cancel)."""
+        """Wait for ev, but give up early when the user presses Enter (paste raw), Esc (cancel) or a follower claimed us."""
         end = time.time() + timeout
-        while not ev.is_set() and time.time() < end and not (self.paste_now or self.cancelled):
+        while not ev.is_set() and time.time() < end and not (self.paste_now or self.cancelled or self.handed):
             ev.wait(0.1)
 
     def _cmd_learn(self, word, selected):
@@ -535,15 +651,19 @@ class Session:
     def _deliver(self, final):
         """Insert into the app we started in; if it changed or insertion fails, leave the text on the clipboard."""
         cfg = {**self.cfg, "output": {"method": "type"}} if self.sensitive else self.cfg  # typed, so it never touches the clipboard
+        self.pasting(True)  # our ctrl+v must not look like typing or a chord on a held dictate key
         try:
-            if win.active_app()[0] == self.app:
-                win.insert(final, cfg)
-                return True
-        except Exception:
-            log.exception("insert failed")
-        if not self.sensitive:
-            win.to_clipboard(final)
-        return False
+            try:
+                if win.active_app()[0] == self.app:
+                    win.insert(final, cfg)
+                    return True
+            except Exception:
+                log.exception("insert failed")
+            if not self.sensitive:
+                win.to_clipboard(final)
+            return False
+        finally:
+            self.pasting(False)
 
     def _paste_and_log(self, final):
         prev = (store.read_history(1) or [None])[-1] if not self.private else None
@@ -566,14 +686,28 @@ class Session:
                  "tone": self.ctx["tone"], "mode": self.mode, "raw": self.raw, "final": final, "latency": lat}
         if self.mode == "command":
             entry["selection"], entry["target"] = self.selection, self.target
-        else:  # speaking metrics from the heard transcript (never reached for private or sensitive rows)
-            entry.update(speech.capture_fields(self.raw, (getattr(self, "t_end", time.time()) - self.t0) if hasattr(self, "t0") else 0.0, self.vad))
+        else:  # speaking metrics from the heard transcript (never reached for private or sensitive rows); a resume adds the handed-over take
+            vad = {**self.vad, "speech_s": self.vad["speech_s"] + self.head_vad[0], "pauses": self.vad["pauses"] + self.head_vad[1]}
+            t0 = self.t_first or getattr(self, "t0", None)
+            entry.update(speech.capture_fields(self.raw, (getattr(self, "t_end", time.time()) - t0) if t0 else 0.0, vad))
             self.hint = speech.hint(entry, self.cfg.get("coach", {}).get("goals", [])) if self.cfg.get("coach", {}).get("card_hint") else ""
         store.append_history(entry)
         if self.mode == "dictate":
             self._adapt(entry, final)
         self._learn_from_redictation(prev, final)
         self._post(lambda: self._show_outcome(final))
+
+    def _own_context(self):
+        """No field text from UIA (a no_copy terminal, or a failed read): murmur's own last paste into this app
+        stands in as `before` (brain.own_before) so fit spaces after its period and the prompt knows the sentence state.
+        Never for private or sensitive sessions."""
+        if "before" in self.ctx:  # UIA read the field (a known-empty field stays empty: a click may have moved us)
+            self.ctx_src = "uia" if self.ctx["before"].strip() else "none"
+            return
+        if self.private:
+            return
+        if text := brain.own_before(self.last_paste(), self.app, time.time(), self.typed_at()):
+            self.ctx["before"], self.ctx_src = text, "lastpaste"
 
     def _log_dictation(self):
         """One INFO line per dictation: sizes and flags only, never text; a bare marker for private/sensitive sessions."""
@@ -582,9 +716,10 @@ class Session:
             return
         c = self.ctx
         sel = "none" if "before" not in c else "known" if c.get("sel_known") else "unknown"
-        log.info("dictation app=%s text=%s before=%d after=%d sel=%s anchor=%s segments=%d redecoded=%s live=%s guard=%s", self.app,
-                 "blocked" if self.app in store.no_copy(self.cfg) else "read", len(c.get("before", "")), len(c.get("after", "")),
-                 sel, getattr(self, "anchor_kind", "none"), self.segments, "yes" if self.redecoded else "no", self.live_use, "raw" if self.kept_raw or self.degraded else "ok")
+        log.info("dictation app=%s text=%s before=%d after=%d sel=%s ctx=%s anchor=%s segments=%d redecoded=%s live=%s guard=%s resumed=%s",
+                 self.app, "blocked" if self.app in store.no_copy(self.cfg) else "read", len(c.get("before", "")), len(c.get("after", "")),
+                 sel, self.ctx_src, getattr(self, "anchor_kind", "none"), self.segments, "yes" if self.redecoded else "no", self.live_use,
+                 "raw" if self.kept_raw or self.degraded else "ok", "yes" if self.merged else "no")
 
     def _adapt(self, entry, final):
         """Feed the learners after a dictate paste (never reached in private mode or for password fields)."""
